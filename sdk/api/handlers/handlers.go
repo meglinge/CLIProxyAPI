@@ -538,6 +538,9 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	// Resolve "auto" model to an actual available model first
 	resolvedModelName := util.ResolveAutoModel(modelName)
 
+	// Map Claude Code model names to Antigravity model names (fix for model routing)
+	resolvedModelName = mapModelToAntigravity(resolvedModelName)
+
 	// Normalize the model name to handle dynamic thinking suffixes before determining the provider.
 	normalizedModel, metadata = normalizeModelMetadata(resolvedModelName)
 

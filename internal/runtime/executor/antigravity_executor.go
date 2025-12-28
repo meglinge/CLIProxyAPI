@@ -154,7 +154,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 			return resp, err
 		}
 
-		reporter.publish(ctx, parseAntigravityUsage(bodyBytes))
+		reporter.publish(ctx, parseAntigravityUsageFix(bodyBytes))
 		var param any
 		converted := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, bodyBytes, &param)
 		resp = cliproxyexecutor.Response{Payload: []byte(converted)}
@@ -276,7 +276,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 					continue
 				}
 
-				if detail, ok := parseAntigravityStreamUsage(payload); ok {
+				if detail, ok := parseAntigravityStreamUsageFix(payload); ok {
 					reporter.publish(ctx, detail)
 				}
 
@@ -303,7 +303,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		}
 		resp = cliproxyexecutor.Response{Payload: e.convertStreamToNonStream(buffer.Bytes())}
 
-		reporter.publish(ctx, parseAntigravityUsage(resp.Payload))
+		reporter.publish(ctx, parseAntigravityUsageFix(resp.Payload))
 		var param any
 		converted := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, resp.Payload, &param)
 		resp = cliproxyexecutor.Response{Payload: []byte(converted)}
@@ -612,7 +612,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 					continue
 				}
 
-				if detail, ok := parseAntigravityStreamUsage(payload); ok {
+				if detail, ok := parseAntigravityStreamUsageFix(payload); ok {
 					reporter.publish(ctx, detail)
 				}
 
