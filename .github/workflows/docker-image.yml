@@ -8,7 +8,6 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 permissions:
   contents: read
@@ -32,6 +31,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate Build Metadata
         run: |
+          echo IMAGE_NAME=${{ github.repository_owner }}/cli-proxy-api >> $GITHUB_ENV
           echo VERSION=`git describe --tags --always --dirty` >> $GITHUB_ENV
           echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
           echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
