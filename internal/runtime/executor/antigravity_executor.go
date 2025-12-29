@@ -201,6 +201,13 @@ func (e *AntigravityExecutor) executeClaudeNonStreamWithRecovery(ctx context.Con
 	translated = normalizeAntigravityThinking(req.Model, translated)
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, "antigravity", "request", translated)
 
+	// When recovering from signature error, disable Extended Thinking
+	// This is a graceful degradation - thinking blocks were converted to text
+	if isRecoveryAttempt {
+		translated, _ = sjson.DeleteBytes(translated, "request.generationConfig.thinkingConfig")
+		log.Infof("antigravity executor: disabled thinkingConfig for recovery attempt (non-stream)")
+	}
+
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
@@ -558,6 +565,13 @@ func (e *AntigravityExecutor) executeStreamWithRecovery(ctx context.Context, aut
 	translated = util.ApplyDefaultThinkingIfNeededCLI(req.Model, translated)
 	translated = normalizeAntigravityThinking(req.Model, translated)
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, "antigravity", "request", translated)
+
+	// When recovering from signature error, disable Extended Thinking
+	// This is a graceful degradation - thinking blocks were converted to text
+	if isRecoveryAttempt {
+		translated, _ = sjson.DeleteBytes(translated, "request.generationConfig.thinkingConfig")
+		log.Infof("antigravity executor: disabled thinkingConfig for recovery attempt (stream)")
+	}
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
