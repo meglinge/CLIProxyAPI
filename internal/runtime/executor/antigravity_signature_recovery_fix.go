@@ -20,6 +20,7 @@ package executor
 
 import (
 	"bytes"
+	"context"
 	"strconv"
 	"strings"
 
@@ -27,6 +28,44 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// signatureRecoveryAttemptKey is the context key for tracking recovery attempts.
+type signatureRecoveryAttemptKey struct{}
+
+// IsSignatureRecoveryAttemptFix checks if current request is a recovery attempt.
+func IsSignatureRecoveryAttemptFix(ctx context.Context) bool {
+	v, _ := ctx.Value(signatureRecoveryAttemptKey{}).(bool)
+	return v
+}
+
+// WithSignatureRecoveryAttemptFix marks the context as a recovery attempt.
+func WithSignatureRecoveryAttemptFix(ctx context.Context) context.Context {
+	return context.WithValue(ctx, signatureRecoveryAttemptKey{}, true)
+}
+
+// DisableThinkingConfigForRecoveryFix removes thinkingConfig from Antigravity payload during recovery.
+func DisableThinkingConfigForRecoveryFix(ctx context.Context, payload []byte) []byte {
+	if !IsSignatureRecoveryAttemptFix(ctx) {
+		return payload
+	}
+	result, _ := sjson.DeleteBytes(payload, "request.generationConfig.thinkingConfig")
+	log.Infof("signature recovery: disabled thinkingConfig for recovery attempt")
+	return result
+}
+
+// TrySignatureRecoveryFix attempts signature error recovery for Claude models.
+// Returns (recoveredPayload, recoveryCtx, shouldRetry).
+func TrySignatureRecoveryFix(ctx context.Context, statusCode int, body, payload []byte, model string) ([]byte, context.Context, bool) {
+	if !ShouldRetryWithRecoveryFix(statusCode, body, model, IsSignatureRecoveryAttemptFix(ctx)) {
+		return nil, ctx, false
+	}
+	recovered := ConvertThinkingToTextForRecoveryFix(payload)
+	if !PayloadChangedAfterRecovery(payload, recovered) {
+		return nil, ctx, false
+	}
+	log.Infof("signature recovery: retrying with thinking blocks converted to text")
+	return recovered, WithSignatureRecoveryAttemptFix(ctx), true
+}
 
 const (
 	// skipThoughtSignatureValidatorFix is the sentinel value used to bypass signature validation
