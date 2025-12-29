@@ -175,6 +175,11 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 
 // executeClaudeNonStream performs a claude non-streaming request to the Antigravity API.
 func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	return e.executeClaudeNonStreamWithRecovery(ctx, auth, req, opts, false)
+}
+
+// executeClaudeNonStreamWithRecovery performs non-streaming request with signature error recovery support.
+func (e *AntigravityExecutor) executeClaudeNonStreamWithRecovery(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, isRecoveryAttempt bool) (resp cliproxyexecutor.Response, err error) {
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
 		return resp, errToken
@@ -245,6 +250,25 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 			lastStatus = httpResp.StatusCode
 			lastBody = append([]byte(nil), bodyBytes...)
 			lastErr = nil
+
+			// Signature error recovery: convert thinking blocks to text and retry
+			if ShouldRetryWithRecoveryFix(httpResp.StatusCode, bodyBytes, req.Model, isRecoveryAttempt) {
+				log.Warnf("antigravity executor: detected signature validation error (status=%d), attempting recovery (non-stream)", httpResp.StatusCode)
+				recoveredPayload := ConvertThinkingToTextForRecoveryFix(req.Payload)
+
+				// Verify the conversion actually changed the payload
+				if !PayloadChangedAfterRecovery(req.Payload, recoveredPayload) {
+					log.Errorf("antigravity executor: signature recovery failed - payload unchanged, not retrying (non-stream)")
+					err = statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+					return resp, err
+				}
+
+				log.Infof("antigravity executor: retrying request with thinking blocks converted to text (non-stream)")
+				recoveredReq := req
+				recoveredReq.Payload = recoveredPayload
+				return e.executeClaudeNonStreamWithRecovery(ctx, auth, recoveredReq, opts, true)
+			}
+
 			if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 				log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 				continue
@@ -507,6 +531,11 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 
 // ExecuteStream performs a streaming request to the Antigravity API.
 func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+	return e.executeStreamWithRecovery(ctx, auth, req, opts, false)
+}
+
+// executeStreamWithRecovery performs streaming request with signature error recovery support.
+func (e *AntigravityExecutor) executeStreamWithRecovery(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, isRecoveryAttempt bool) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
 	ctx = context.WithValue(ctx, "alt", "")
 
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
@@ -579,6 +608,25 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			lastStatus = httpResp.StatusCode
 			lastBody = append([]byte(nil), bodyBytes...)
 			lastErr = nil
+
+			// Signature error recovery: convert thinking blocks to text and retry
+			if ShouldRetryWithRecoveryFix(httpResp.StatusCode, bodyBytes, req.Model, isRecoveryAttempt) {
+				log.Warnf("antigravity executor: detected signature validation error (status=%d), attempting recovery", httpResp.StatusCode)
+				recoveredPayload := ConvertThinkingToTextForRecoveryFix(req.Payload)
+
+				// Verify the conversion actually changed the payload
+				if !PayloadChangedAfterRecovery(req.Payload, recoveredPayload) {
+					log.Errorf("antigravity executor: signature recovery failed - payload unchanged, not retrying")
+					err = statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+					return nil, err
+				}
+
+				log.Infof("antigravity executor: retrying request with thinking blocks converted to text")
+				recoveredReq := req
+				recoveredReq.Payload = recoveredPayload
+				return e.executeStreamWithRecovery(ctx, auth, recoveredReq, opts, true)
+			}
+
 			if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 				log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 				continue
