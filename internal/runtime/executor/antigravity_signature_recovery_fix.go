@@ -72,13 +72,25 @@ func IsSignatureValidationErrorFix(statusCode int, body []byte) bool {
 // ConvertThinkingToTextForRecoveryFix converts thinking blocks to text blocks in Claude format request.
 // This is the recovery transformation applied to the original Claude API request.
 //
-// Transforms:
+// IMPORTANT: When Extended Thinking is enabled, the final assistant message MUST start with
+// a thinking block (type: "thinking" or "redacted_thinking"). This function preserves the
+// first thinking block in the final assistant message while converting others to text.
+//
+// Transforms (for non-final-assistant thinking blocks):
 //
 //	{type: "thinking", thinking: "content", signature: "xxx"}
 //
 // To:
 //
 //	{type: "text", text: "content"}
+//
+// For the first thinking block in the final assistant message:
+//
+//	{type: "thinking", thinking: "content", signature: "xxx"}
+//
+// To:
+//
+//	{type: "thinking", thinking: "content"} // signature removed, type preserved
 func ConvertThinkingToTextForRecoveryFix(payload []byte) []byte {
 	if !gjson.ValidBytes(payload) {
 		return payload
@@ -93,7 +105,20 @@ func ConvertThinkingToTextForRecoveryFix(payload []byte) []byte {
 		return payload
 	}
 
-	for i, message := range messages.Array() {
+	messagesArray := messages.Array()
+
+	// Find the last assistant message index
+	// This is needed because Extended Thinking requires the final assistant message
+	// to start with a thinking block
+	lastAssistantIdx := -1
+	for i := len(messagesArray) - 1; i >= 0; i-- {
+		if messagesArray[i].Get("role").String() == "assistant" {
+			lastAssistantIdx = i
+			break
+		}
+	}
+
+	for i, message := range messagesArray {
 		contentArray := message.Get("content")
 		if !contentArray.IsArray() {
 			continue
@@ -105,6 +130,18 @@ func ConvertThinkingToTextForRecoveryFix(payload []byte) []byte {
 			// Convert thinking block to text block
 			if contentType == "thinking" {
 				contentPath := "messages." + strconv.Itoa(i) + ".content." + strconv.Itoa(j)
+
+				// Check if this is the first thinking block in the last assistant message
+				// If so, preserve it (only remove signature) to comply with Extended Thinking requirements
+				isLastAssistantFirstThinking := (i == lastAssistantIdx && j == 0)
+
+				if isLastAssistantFirstThinking {
+					// Preserve the thinking block type, only remove invalid signature
+					result, _ = sjson.Delete(result, contentPath+".signature")
+					modified = true
+					log.Debugf("signature recovery: preserved first thinking block in final assistant message at %s (signature removed)", contentPath)
+					continue
+				}
 
 				// Get the thinking text
 				thinkingText := content.Get("thinking").String()
@@ -122,7 +159,7 @@ func ConvertThinkingToTextForRecoveryFix(payload []byte) []byte {
 	}
 
 	if modified {
-		log.Infof("signature recovery: converted thinking blocks to text blocks for retry")
+		log.Infof("signature recovery: converted thinking blocks (preserved final assistant first thinking block)")
 	}
 
 	return []byte(result)
