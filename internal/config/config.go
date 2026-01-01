@@ -499,6 +499,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Normalize global OAuth model name mappings.
 	cfg.SanitizeOAuthModelMappings()
+	cfg.ApplyDefaultModelMappings()
 
 	if cfg.legacyMigrationPending {
 		fmt.Println("Detected legacy configuration keys, attempting to persist the normalized config...")
