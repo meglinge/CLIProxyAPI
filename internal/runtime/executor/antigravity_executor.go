@@ -206,7 +206,6 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	translated = util.ApplyDefaultThinkingIfNeededCLI(req.Model, req.Metadata, translated)
 	translated = normalizeAntigravityThinking(req.Model, translated, true)
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, "antigravity", "request", translated, originalTranslated)
-	translated = DisableThinkingConfigForRecoveryFix(ctx, translated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -257,10 +256,6 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 			lastStatus = httpResp.StatusCode
 			lastBody = append([]byte(nil), bodyBytes...)
 			lastErr = nil
-			if recovered, recoveryCtx, shouldRetry := TrySignatureRecoveryFix(ctx, httpResp.StatusCode, bodyBytes, req.Payload, req.Model); shouldRetry {
-				req.Payload = recovered
-				return e.executeClaudeNonStream(recoveryCtx, auth, req, opts)
-			}
 			if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 				log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 				continue
@@ -552,7 +547,6 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	translated = util.ApplyDefaultThinkingIfNeededCLI(req.Model, req.Metadata, translated)
 	translated = normalizeAntigravityThinking(req.Model, translated, isClaude)
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, "antigravity", "request", translated, originalTranslated)
-	translated = DisableThinkingConfigForRecoveryFix(ctx, translated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -603,10 +597,6 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			lastStatus = httpResp.StatusCode
 			lastBody = append([]byte(nil), bodyBytes...)
 			lastErr = nil
-			if recovered, recoveryCtx, shouldRetry := TrySignatureRecoveryFix(ctx, httpResp.StatusCode, bodyBytes, req.Payload, req.Model); shouldRetry {
-				req.Payload = recovered
-				return e.ExecuteStream(recoveryCtx, auth, req, opts)
-			}
 			if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 				log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 				continue
