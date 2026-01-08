@@ -783,19 +783,6 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 
 		if httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {
 			count := gjson.GetBytes(bodyBytes, "totalTokens").Int()
-
-			// 补偿 Google countTokens API 对 Claude 模型不计算 tools 的问题。
-			// Google 返回 tools 约为 1 token，但 Claude 实际会正确计算。
-			// 这会导致 Claude Code 不触发压缩，最终报 "Prompt is too long"。
-			if isClaude {
-				toolsTokens := EstimateToolsTokensForClaude(req.Payload)
-				if toolsTokens > 0 {
-					count += toolsTokens
-					bodyBytes, _ = sjson.SetBytes(bodyBytes, "totalTokens", count)
-					log.Infof("antigravity executor: 补偿 Claude 模型 tools token 计数, 增加 %d tokens, 新总数: %d", toolsTokens, count)
-				}
-			}
-
 			translated := sdktranslator.TranslateTokenCount(respCtx, to, from, count, bodyBytes)
 			return cliproxyexecutor.Response{Payload: []byte(translated)}, nil
 		}

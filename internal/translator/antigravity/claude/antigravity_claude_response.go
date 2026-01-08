@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/tidwall/gjson"
@@ -101,7 +102,16 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 
 		// Use cpaUsageMetadata within the message_start event for Claude.
 		if promptTokenCount := gjson.GetBytes(rawJSON, "response.cpaUsageMetadata.promptTokenCount"); promptTokenCount.Exists() {
-			messageStartTemplate, _ = sjson.Set(messageStartTemplate, "message.usage.input_tokens", promptTokenCount.Int())
+			adjustedTokens := promptTokenCount.Int()
+			// 补偿 Google API 对 Claude 模型不正确计算 tools token 的问题
+			if model := gjson.GetBytes(rawJSON, "response.modelVersion").String(); strings.Contains(strings.ToLower(model), "claude") {
+				toolsTokens := estimateToolsTokens(originalRequestRawJSON)
+				if toolsTokens > 0 {
+					adjustedTokens += toolsTokens
+					log.Infof("antigravity claude response: 补偿 tools token (message_start), 原始=%d, 增加=%d, 调整后=%d", promptTokenCount.Int(), toolsTokens, adjustedTokens)
+				}
+			}
+			messageStartTemplate, _ = sjson.Set(messageStartTemplate, "message.usage.input_tokens", adjustedTokens)
 		}
 		if candidatesTokenCount := gjson.GetBytes(rawJSON, "response.cpaUsageMetadata.candidatesTokenCount"); candidatesTokenCount.Exists() {
 			messageStartTemplate, _ = sjson.Set(messageStartTemplate, "message.usage.output_tokens", candidatesTokenCount.Int())
@@ -281,6 +291,17 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 		params.HasUsageMetadata = true
 		params.CachedTokenCount = usageResult.Get("cachedContentTokenCount").Int()
 		params.PromptTokenCount = usageResult.Get("promptTokenCount").Int() - params.CachedTokenCount
+		
+		// 补偿 Google API 对 Claude 模型不正确计算 tools token 的问题
+		if model := gjson.GetBytes(rawJSON, "response.modelVersion").String(); strings.Contains(strings.ToLower(model), "claude") {
+			toolsTokens := estimateToolsTokens(originalRequestRawJSON)
+			if toolsTokens > 0 {
+				originalPrompt := params.PromptTokenCount
+				params.PromptTokenCount += toolsTokens
+				log.Infof("antigravity claude response: 补偿 tools token (usageMetadata), 原始=%d, 增加=%d, 调整后=%d", originalPrompt, toolsTokens, params.PromptTokenCount)
+			}
+		}
+		
 		params.CandidatesTokenCount = usageResult.Get("candidatesTokenCount").Int()
 		params.ThoughtsTokenCount = usageResult.Get("thoughtsTokenCount").Int()
 		params.TotalTokenCount = usageResult.Get("totalTokenCount").Int()
@@ -371,7 +392,6 @@ func resolveStopReason(params *Params) string {
 // Returns:
 //   - string: A Claude-compatible JSON response.
 func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
-	_ = originalRequestRawJSON
 	_ = requestRawJSON
 
 	root := gjson.ParseBytes(rawJSON)
@@ -380,6 +400,17 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 	thoughtTokens := root.Get("response.usageMetadata.thoughtsTokenCount").Int()
 	totalTokens := root.Get("response.usageMetadata.totalTokenCount").Int()
 	cachedTokens := root.Get("response.usageMetadata.cachedContentTokenCount").Int()
+	
+	// 补偿 Google API 对 Claude 模型不正确计算 tools token 的问题
+	if model := root.Get("response.modelVersion").String(); strings.Contains(strings.ToLower(model), "claude") {
+		toolsTokens := estimateToolsTokens(originalRequestRawJSON)
+		if toolsTokens > 0 {
+			originalPrompt := promptTokens
+			promptTokens += toolsTokens
+			log.Infof("antigravity claude response: 补偿 tools token (non-stream), 原始=%d, 增加=%d, 调整后=%d", originalPrompt, toolsTokens, promptTokens)
+		}
+	}
+	
 	outputTokens := candidateTokens + thoughtTokens
 	if outputTokens == 0 && totalTokens > 0 {
 		outputTokens = totalTokens - promptTokens
@@ -521,4 +552,9 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 
 func ClaudeTokenCount(ctx context.Context, count int64) string {
 	return fmt.Sprintf(`{"input_tokens":%d}`, count)
+}
+
+// estimateToolsTokens 使用 executor 包的精确估算算法
+func estimateToolsTokens(payload []byte) int64 {
+	return executor.EstimateToolsTokensForClaude(payload)
 }
