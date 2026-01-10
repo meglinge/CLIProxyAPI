@@ -4,7 +4,6 @@ package executor
 
 import (
 	"math"
-	"unicode"
 
 	"github.com/tidwall/gjson"
 )
@@ -59,17 +58,15 @@ func isWesternChar(c rune) bool {
 }
 
 // countCharUnits 计算字符串的字符单位。
-// 西文字符 = 1 单位，非西文（中日韩等）= 4.5 单位。
+// 西文字符 = 1 单位，非西文（中日韩等）= 4.0 单位。
 // 4 个字符单位 = 1 token。
 func countCharUnits(s string) float64 {
 	var units float64
 	for _, c := range s {
-		if unicode.IsSpace(c) {
-			units += 0.25
-		} else if isWesternChar(c) {
+		if isWesternChar(c) {
 			units += 1.0
 		} else {
-			units += 4.5 // 中日韩及其他非西文字符
+			units += 4.0 // 中日韩及其他非西文字符
 		}
 	}
 	return units
