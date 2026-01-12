@@ -16,6 +16,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -1540,6 +1541,14 @@ func antigravityMinThinkingBudget(model string) int {
 
 const webSearchGeminiModel = "gemini-2.5-flash"
 
+// googleURLRegex 用于匹配所有 google.com 相关的 URL
+var googleURLRegex = regexp.MustCompile(`https?://[a-zA-Z0-9.-]*google\.com[^\s]*`)
+
+// stripGoogleURLs 移除文本中所有 google.com 相关的 URL
+func stripGoogleURLs(text string) string {
+	return strings.TrimSpace(googleURLRegex.ReplaceAllString(text, ""))
+}
+
 // doWebSearchTool 检查原始请求中是否包含 web_search 工具
 func doWebSearchTool(payload []byte) bool {
 	tools := gjson.GetBytes(payload, "tools")
@@ -1732,6 +1741,9 @@ func convertGeminiToClaudeNonStream(model string, geminiResp []byte) string {
 		}
 	}
 
+	// 过滤 textContent 中的 google.com 相关 URL
+	textContent = stripGoogleURLs(textContent)
+
 	groundingMetadata := gjson.GetBytes(geminiResp, "response.candidates.0.groundingMetadata")
 	if !groundingMetadata.Exists() {
 		groundingMetadata = gjson.GetBytes(geminiResp, "candidates.0.groundingMetadata")
@@ -1769,7 +1781,7 @@ func convertGeminiToClaudeNonStream(model string, geminiResp []byte) string {
 	}
 	content = append(content, serverToolUse)
 
-	// 2. web_search_tool_result 块
+	// 2. web_search_tool_result 块（过滤 vertexaisearch.cloud.google.com URL）
 	webSearchResults := []map[string]interface{}{}
 	groundingChunks := groundingMetadata.Get("groundingChunks")
 	if groundingChunks.IsArray() {
@@ -1783,8 +1795,12 @@ func convertGeminiToClaudeNonStream(model string, geminiResp []byte) string {
 				if title := web.Get("title"); title.Exists() {
 					result["title"] = title.String()
 				}
+				// 只有不包含 vertexaisearch.cloud.google.com 的 URL 才设置
 				if uri := web.Get("uri"); uri.Exists() {
-					result["url"] = uri.String()
+					uriStr := uri.String()
+					if !strings.Contains(uriStr, "vertexaisearch.cloud.google.com") {
+						result["url"] = uriStr
+					}
 				}
 				if domain := web.Get("domain"); domain.Exists() {
 					result["encrypted_content"] = domain.String()
@@ -1793,12 +1809,14 @@ func convertGeminiToClaudeNonStream(model string, geminiResp []byte) string {
 			}
 		}
 	}
-	webSearchToolResult := map[string]interface{}{
-		"type":        "web_search_tool_result",
-		"tool_use_id": toolUseID,
-		"content":     webSearchResults,
+	if len(webSearchResults) > 0 {
+		webSearchToolResult := map[string]interface{}{
+			"type":        "web_search_tool_result",
+			"tool_use_id": toolUseID,
+			"content":     webSearchResults,
+		}
+		content = append(content, webSearchToolResult)
 	}
-	content = append(content, webSearchToolResult)
 
 	// 3. Gemini 响应的 text 块
 	if textContent != "" {
@@ -1851,6 +1869,9 @@ func convertGeminiToClaudeSSEStream(model string, geminiResp []byte) []string {
 		}
 	}
 
+	// 过滤 textContent 中的 google.com 相关 URL
+	textContent = stripGoogleURLs(textContent)
+
 	groundingMetadata := gjson.GetBytes(geminiResp, "response.candidates.0.groundingMetadata")
 	if !groundingMetadata.Exists() {
 		groundingMetadata = gjson.GetBytes(geminiResp, "candidates.0.groundingMetadata")
@@ -1898,8 +1919,9 @@ func convertGeminiToClaudeSSEStream(model string, geminiResp []byte) []string {
 	events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", contentIndex))
 	contentIndex++
 
-	// 3. web_search_tool_result 块 (index 1)
+	// 3. web_search_tool_result 块（过滤 vertexaisearch.cloud.google.com URL）
 	webSearchResults := "[]"
+	hasResults := false
 	groundingChunks := groundingMetadata.Get("groundingChunks")
 	if groundingChunks.IsArray() {
 		for _, chunk := range groundingChunks.Array() {
@@ -1909,26 +1931,33 @@ func convertGeminiToClaudeSSEStream(model string, geminiResp []byte) []string {
 				if title := web.Get("title"); title.Exists() {
 					result, _ = sjson.Set(result, "title", title.String())
 				}
+				// 只有不包含 vertexaisearch.cloud.google.com 的 URL 才设置
 				if uri := web.Get("uri"); uri.Exists() {
-					result, _ = sjson.Set(result, "url", uri.String())
+					uriStr := uri.String()
+					if !strings.Contains(uriStr, "vertexaisearch.cloud.google.com") {
+						result, _ = sjson.Set(result, "url", uriStr)
+					}
 				}
 				if domain := web.Get("domain"); domain.Exists() {
 					result, _ = sjson.Set(result, "encrypted_content", domain.String())
 				}
 				result, _ = sjson.Set(result, "page_age", nil)
 				webSearchResults, _ = sjson.SetRaw(webSearchResults, "-1", result)
+				hasResults = true
 			}
 		}
 	}
 
-	webSearchToolResultStart := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"web_search_tool_result","tool_use_id":"%s","content":[]}}`,
-		contentIndex, toolUseID)
-	webSearchToolResultStart, _ = sjson.SetRaw(webSearchToolResultStart, "content_block.content", webSearchResults)
-	events = append(events, "event: content_block_start\ndata: "+webSearchToolResultStart+"\n\n")
-	events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", contentIndex))
-	contentIndex++
+	if hasResults {
+		webSearchToolResultStart := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"web_search_tool_result","tool_use_id":"%s","content":[]}}`,
+			contentIndex, toolUseID)
+		webSearchToolResultStart, _ = sjson.SetRaw(webSearchToolResultStart, "content_block.content", webSearchResults)
+		events = append(events, "event: content_block_start\ndata: "+webSearchToolResultStart+"\n\n")
+		events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", contentIndex))
+		contentIndex++
+	}
 
-	// 4. Gemini 响应的 text 块 (index 2)
+	// 4. Gemini 响应的 text 块
 	if textContent != "" {
 		textBlockStart := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, contentIndex)
 		events = append(events, "event: content_block_start\ndata: "+textBlockStart+"\n\n")
