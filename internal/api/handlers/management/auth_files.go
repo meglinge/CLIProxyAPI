@@ -432,6 +432,21 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if claims := extractCodexIDTokenClaims(auth); claims != nil {
 		entry["id_token"] = claims
 	}
+	if len(auth.ModelStates) > 0 {
+		modelStates := make(map[string]gin.H, len(auth.ModelStates))
+		for model, state := range auth.ModelStates {
+			modelStates[model] = gin.H{
+				"unavailable": state.Unavailable,
+				"quota": gin.H{
+					"exceeded":        state.Quota.Exceeded,
+					"reason":          state.Quota.Reason,
+					"next_recover_at": state.Quota.NextRecoverAt,
+				},
+				"next_retry_after": state.NextRetryAfter,
+			}
+		}
+		entry["model_states"] = modelStates
+	}
 	return entry
 }
 
