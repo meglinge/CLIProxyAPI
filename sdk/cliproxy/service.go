@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
@@ -1358,5 +1359,69 @@ func (s *Service) registerAntigravityQuotaRefresh() {
 		if len(models) > 0 {
 			log.Debugf("antigravity quota refresh: updated quota state for auth %s, found %d models", authID, len(models))
 		}
+	})
+
+	// Register quota check callback for 429 handling
+	coreauth.SetQuotaCheckFunc(func(ctx context.Context, authID string, model string) coreauth.QuotaCheckResult {
+		if authID == "" {
+			return coreauth.QuotaCheckResult{Checked: false}
+		}
+
+		authEntry, ok := s.coreManager.GetByID(authID)
+		if !ok || authEntry == nil || authEntry.Provider != "antigravity" {
+			return coreauth.QuotaCheckResult{Checked: false}
+		}
+
+		s.cfgMu.RLock()
+		cfg := s.cfg
+		s.cfgMu.RUnlock()
+
+		// Fetch models to get actual quota state
+		models := executor.FetchAntigravityModels(ctx, authEntry, cfg)
+		if len(models) == 0 {
+			// Fetch failed, return Checked=false to fall back to conservative strategy
+			return coreauth.QuotaCheckResult{Checked: false}
+		}
+
+		// After FetchAntigravityModels, the auth's ModelStates are updated
+		// Check if the model (or its group) is actually exhausted
+		result := coreauth.QuotaCheckResult{Checked: true, Exhausted: false}
+
+		if authEntry.ModelStates != nil {
+			// Try direct match first
+			if state, ok := authEntry.ModelStates[model]; ok && state != nil {
+				if state.Quota.Exceeded && state.Unavailable {
+					result.Exhausted = true
+					result.ResetTime = state.Quota.NextRecoverAt
+					return result
+				}
+			}
+
+			// Try normalized model name (strip thinking suffix, etc.)
+			baseModel := thinking.ParseSuffix(model).ModelName
+			if baseModel != model {
+				if state, ok := authEntry.ModelStates[baseModel]; ok && state != nil {
+					if state.Quota.Exceeded && state.Unavailable {
+						result.Exhausted = true
+						result.ResetTime = state.Quota.NextRecoverAt
+						return result
+					}
+				}
+			}
+
+			// Check if any model in the same quota group is exhausted
+			groupModels := registry.GetAntigravityQuotaGroupModels(baseModel)
+			for _, groupModel := range groupModels {
+				if state, ok := authEntry.ModelStates[groupModel]; ok && state != nil {
+					if state.Quota.Exceeded && state.Unavailable {
+						result.Exhausted = true
+						result.ResetTime = state.Quota.NextRecoverAt
+						return result
+					}
+				}
+			}
+		}
+
+		return result
 	})
 }

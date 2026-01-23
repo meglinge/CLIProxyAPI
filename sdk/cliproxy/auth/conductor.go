@@ -61,6 +61,43 @@ func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
 }
 
+// QuotaCheckResult holds the result of a quota check.
+type QuotaCheckResult struct {
+	Exhausted bool      // Whether the quota is exhausted (remainingFraction <= 0)
+	ResetTime time.Time // When the quota will reset
+	Checked   bool      // Whether the check was performed successfully
+}
+
+// QuotaCheckFunc is called to check actual quota state for an auth.
+// Returns whether the quota is actually exhausted based on remainingFraction from API.
+type QuotaCheckFunc func(ctx context.Context, authID string, model string) QuotaCheckResult
+
+var (
+	quotaCheckMu   sync.RWMutex
+	quotaCheckFunc QuotaCheckFunc
+)
+
+// SetQuotaCheckFunc registers the function to call when checking actual quota state.
+// This is called after 429 to verify if quota is actually exhausted.
+func SetQuotaCheckFunc(fn QuotaCheckFunc) {
+	quotaCheckMu.Lock()
+	quotaCheckFunc = fn
+	quotaCheckMu.Unlock()
+}
+
+// checkAntigravityQuota calls the registered quota check function if available.
+func checkAntigravityQuota(ctx context.Context, authID string, model string) QuotaCheckResult {
+	quotaCheckMu.RLock()
+	fn := quotaCheckFunc
+	quotaCheckMu.RUnlock()
+
+	if fn == nil {
+		return QuotaCheckResult{Checked: false}
+	}
+
+	return fn(ctx, authID, model)
+}
+
 // Result captures execution outcome used to adjust auth state.
 type Result struct {
 	// AuthID references the auth that produced this result.
@@ -1292,6 +1329,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		return
 	}
 
+	// For Antigravity 429, check actual quota BEFORE acquiring lock to avoid deadlock
+	var quotaCheckResult QuotaCheckResult
+	statusCode := statusCodeFromResult(result.Error)
+	if !result.Success && statusCode == 429 && strings.EqualFold(result.Provider, "antigravity") {
+		checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		quotaCheckResult = checkAntigravityQuota(checkCtx, result.AuthID, result.Model)
+		checkCancel()
+		if quotaCheckResult.Checked {
+			log.Debugf("antigravity quota check: auth=%s model=%s exhausted=%v resetTime=%s",
+				result.AuthID, result.Model, quotaCheckResult.Exhausted, quotaCheckResult.ResetTime.Format(time.RFC3339))
+		}
+	}
+
 	shouldResumeModel := false
 	shouldSuspendModel := false
 	suspendReason := ""
@@ -1331,7 +1381,6 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					auth.StatusMessage = result.Error.Message
 				}
 
-				statusCode := statusCodeFromResult(result.Error)
 				switch statusCode {
 				case 401:
 					next := now.Add(30 * time.Minute)
@@ -1351,30 +1400,49 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				case 429:
 					var next time.Time
 					backoffLevel := state.Quota.BackoffLevel
-					if result.RetryAfter != nil {
-						next = now.Add(*result.RetryAfter)
-					} else {
-						cooldown, nextLevel := nextQuotaCooldown(backoffLevel)
-						if cooldown > 0 {
-							next = now.Add(cooldown)
-						}
-						backoffLevel = nextLevel
-					}
-					state.NextRetryAfter = next
-					state.Quota = QuotaState{
-						Exceeded:      true,
-						Reason:        "quota",
-						NextRecoverAt: next,
-						BackoffLevel:  backoffLevel,
-					}
-					suspendReason = "quota"
-					shouldSuspendModel = true
-					setModelQuota = true
+					quotaActuallyExhausted := true
 
-					// For Antigravity provider, mark all models in the quota group as unavailable
-					// Use result.Provider (routing provider) not auth.Provider (credential field)
-					if strings.EqualFold(result.Provider, "antigravity") {
-						markAntigravityQuotaGroup(auth, result.Model, next, backoffLevel, now)
+					// Use pre-computed quota check result for Antigravity
+					if strings.EqualFold(result.Provider, "antigravity") && quotaCheckResult.Checked {
+						quotaActuallyExhausted = quotaCheckResult.Exhausted
+						if !quotaCheckResult.ResetTime.IsZero() && quotaCheckResult.ResetTime.After(now) {
+							next = quotaCheckResult.ResetTime
+						}
+					}
+
+					if quotaActuallyExhausted {
+						if next.IsZero() {
+							if result.RetryAfter != nil {
+								next = now.Add(*result.RetryAfter)
+							} else {
+								cooldown, nextLevel := nextQuotaCooldown(backoffLevel)
+								if cooldown > 0 {
+									next = now.Add(cooldown)
+								}
+								backoffLevel = nextLevel
+							}
+						}
+						state.NextRetryAfter = next
+						state.Quota = QuotaState{
+							Exceeded:      true,
+							Reason:        "quota",
+							NextRecoverAt: next,
+							BackoffLevel:  backoffLevel,
+						}
+						suspendReason = "quota"
+						shouldSuspendModel = true
+						setModelQuota = true
+
+						// For Antigravity provider, mark all models in the quota group as unavailable
+						if strings.EqualFold(result.Provider, "antigravity") {
+							markAntigravityQuotaGroup(auth, result.Model, next, backoffLevel, now)
+						}
+					} else {
+						// Quota not actually exhausted, apply short cooldown for rate limit
+						cooldown := 2 * time.Second
+						state.NextRetryAfter = now.Add(cooldown)
+						log.Debugf("antigravity 429 but quota not exhausted: auth=%s model=%s, applying short cooldown",
+							result.AuthID, result.Model)
 					}
 				case 408, 500, 502, 503, 504:
 					next := now.Add(1 * time.Minute)
