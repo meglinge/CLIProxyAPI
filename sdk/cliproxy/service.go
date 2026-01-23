@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	internalquota "github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -86,6 +87,11 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// quotaPoller refreshes in-memory quota snapshots for routing.
+	quotaPoller *internalquota.Poller
+	// quotaPollerCancel stops the quota poller loop.
+	quotaPollerCancel context.CancelFunc
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -527,6 +533,8 @@ func (s *Service) Run(ctx context.Context) error {
 			switch strategy {
 			case "fill-first", "fillfirst", "ff":
 				return "fill-first"
+			case "quota-weighted", "quota-weight", "quota", "qw":
+				return "quota-weighted"
 			default:
 				return "round-robin"
 			}
@@ -538,6 +546,8 @@ func (s *Service) Run(ctx context.Context) error {
 			switch nextStrategy {
 			case "fill-first":
 				selector = &coreauth.FillFirstSelector{}
+			case "quota-weighted":
+				selector = coreauth.NewQuotaWeightedSelector()
 			default:
 				selector = &coreauth.RoundRobinSelector{}
 			}
@@ -555,6 +565,9 @@ func (s *Service) Run(ctx context.Context) error {
 		if s.coreManager != nil {
 			s.coreManager.SetConfig(newCfg)
 			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
+		}
+		if s.quotaPoller != nil {
+			s.quotaPoller.SetConfig(newCfg)
 		}
 		s.rebindExecutors()
 	}
@@ -582,6 +595,15 @@ func (s *Service) Run(ctx context.Context) error {
 		interval := 15 * time.Minute
 		s.coreManager.StartAutoRefresh(context.Background(), interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
+	}
+	if s.coreManager != nil && s.quotaPoller == nil {
+		s.quotaPoller = internalquota.NewPoller(s.coreManager)
+		if s.quotaPoller != nil {
+			s.quotaPoller.SetConfig(s.cfg)
+			pollCtx, cancel := context.WithCancel(context.Background())
+			s.quotaPollerCancel = cancel
+			s.quotaPoller.Start(pollCtx)
+		}
 	}
 
 	select {
@@ -616,6 +638,10 @@ func (s *Service) Shutdown(ctx context.Context) error {
 
 		if s.watcherCancel != nil {
 			s.watcherCancel()
+		}
+		if s.quotaPollerCancel != nil {
+			s.quotaPollerCancel()
+			s.quotaPollerCancel = nil
 		}
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
