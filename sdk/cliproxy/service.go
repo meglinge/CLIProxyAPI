@@ -582,6 +582,9 @@ func (s *Service) Run(ctx context.Context) error {
 		interval := 15 * time.Minute
 		s.coreManager.StartAutoRefresh(context.Background(), interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
+
+		// Register the quota refresh callback for Antigravity accounts
+		s.registerAntigravityQuotaRefresh()
 	}
 
 	select {
@@ -1327,4 +1330,33 @@ func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models 
 		}
 	}
 	return out
+}
+
+// registerAntigravityQuotaRefresh sets up the quota refresh callback for Antigravity accounts.
+// This is called when quota recovers (resetTime + 5 minutes) to proactively update quota state.
+func (s *Service) registerAntigravityQuotaRefresh() {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+
+	executor.SetQuotaRefreshFunc(func(ctx context.Context, authID string) {
+		if authID == "" {
+			return
+		}
+
+		auth, ok := s.coreManager.GetByID(authID)
+		if !ok || auth == nil || auth.Provider != "antigravity" {
+			return
+		}
+
+		s.cfgMu.RLock()
+		cfg := s.cfg
+		s.cfgMu.RUnlock()
+
+		// Fetch models to update quota state
+		models := executor.FetchAntigravityModels(ctx, auth, cfg)
+		if len(models) > 0 {
+			log.Debugf("antigravity quota refresh: updated quota state for auth %s, found %d models", authID, len(models))
+		}
+	})
 }

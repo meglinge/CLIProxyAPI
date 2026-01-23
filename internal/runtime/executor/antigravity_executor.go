@@ -991,6 +991,9 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 			return nil
 		}
 
+		// Update auth quota state based on API response (proactive quota tracking)
+		UpdateAntigravityQuotaState(auth, bodyBytes)
+
 		now := time.Now().Unix()
 		modelConfig := registry.GetAntigravityModelConfig()
 		models := make([]*registry.ModelInfo, 0, len(result.Map()))

@@ -1370,6 +1370,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					suspendReason = "quota"
 					shouldSuspendModel = true
 					setModelQuota = true
+
+					// For Antigravity provider, mark all models in the quota group as unavailable
+					if auth.Provider == "antigravity" {
+						markAntigravityQuotaGroup(auth, result.Model, next, backoffLevel, now)
+					}
 				case 408, 500, 502, 503, 504:
 					next := now.Add(1 * time.Minute)
 					state.NextRetryAfter = next
@@ -1417,6 +1422,48 @@ func ensureModelState(auth *Auth, model string) *ModelState {
 	state := &ModelState{Status: StatusActive}
 	auth.ModelStates[model] = state
 	return state
+}
+
+// markAntigravityQuotaGroup marks all models in the Antigravity quota group as unavailable.
+// This is called when a 429 is received to ensure all models sharing the same quota pool are blocked.
+func markAntigravityQuotaGroup(auth *Auth, model string, resetTime time.Time, backoffLevel int, now time.Time) {
+	if auth == nil || model == "" {
+		return
+	}
+	groupModels := registry.GetAntigravityQuotaGroupModels(model)
+	if len(groupModels) <= 1 {
+		return // No other models in the group
+	}
+
+	if auth.ModelStates == nil {
+		auth.ModelStates = make(map[string]*ModelState)
+	}
+
+	groupID := registry.GetAntigravityQuotaGroupID(model)
+	for _, groupModel := range groupModels {
+		if groupModel == model {
+			continue // Already handled by the caller
+		}
+		state := auth.ModelStates[groupModel]
+		if state == nil {
+			state = &ModelState{Status: StatusActive}
+			auth.ModelStates[groupModel] = state
+		}
+		// Only update if not already blocked or if new reset time is later
+		if !state.Unavailable || resetTime.After(state.NextRetryAfter) {
+			state.Unavailable = true
+			state.Status = StatusError
+			state.NextRetryAfter = resetTime
+			state.Quota = QuotaState{
+				Exceeded:      true,
+				Reason:        "quota_group",
+				NextRecoverAt: resetTime,
+				BackoffLevel:  backoffLevel,
+			}
+			state.UpdatedAt = now
+			log.Debugf("antigravity quota group %s: marked model %s unavailable until %s (triggered by %s)", groupID, groupModel, resetTime.Format(time.RFC3339), model)
+		}
+	}
 }
 
 func resetModelState(state *ModelState, now time.Time) {
