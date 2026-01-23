@@ -1372,7 +1372,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					setModelQuota = true
 
 					// For Antigravity provider, mark all models in the quota group as unavailable
-					if auth.Provider == "antigravity" {
+					// Use result.Provider (routing provider) not auth.Provider (credential field)
+					if strings.EqualFold(result.Provider, "antigravity") {
 						markAntigravityQuotaGroup(auth, result.Model, next, backoffLevel, now)
 					}
 				case 408, 500, 502, 503, 504:
