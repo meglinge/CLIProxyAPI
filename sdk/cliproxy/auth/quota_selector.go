@@ -26,11 +26,27 @@ type QuotaWeightedSelector struct {
 	mu       sync.Mutex
 	cursors  map[string]map[string]*quotaCursor
 	fallback RoundRobinSelector
+	store    *quota.Store
 }
 
 // NewQuotaWeightedSelector constructs a selector that reads quota from auth metadata.
 func NewQuotaWeightedSelector() *QuotaWeightedSelector {
 	return &QuotaWeightedSelector{}
+}
+
+// NewQuotaWeightedSelectorWithStore constructs a selector with a quota store.
+func NewQuotaWeightedSelectorWithStore(store *quota.Store) *QuotaWeightedSelector {
+	return &QuotaWeightedSelector{store: store}
+}
+
+// SetStore sets the quota store for this selector.
+func (s *QuotaWeightedSelector) SetStore(store *quota.Store) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.store = store
+	s.mu.Unlock()
 }
 
 // Pick selects the next auth using quota-aware weighting.
@@ -111,10 +127,19 @@ func (s *QuotaWeightedSelector) weightFor(auth *Auth, model string) int {
 	if strings.TrimSpace(lookupModel) == "" {
 		lookupModel = "*"
 	}
+	if s.store != nil {
+		if percent, ok := s.store.GetPercent(auth.ID, lookupModel); ok {
+			return percentToWeight(percent)
+		}
+	}
 	percent, ok := quota.GetPercentFromMetadata(auth.Metadata, lookupModel)
 	if !ok {
 		return quotaUnknownWeight
 	}
+	return percentToWeight(percent)
+}
+
+func percentToWeight(percent float64) int {
 	if percent <= 0 {
 		return 0
 	}

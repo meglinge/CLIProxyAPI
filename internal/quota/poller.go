@@ -40,6 +40,7 @@ var (
 // Poller periodically fetches quota data for stored auth entries.
 type Poller struct {
 	manager        *coreauth.Manager
+	store          *quota.Store
 	interval       time.Duration
 	requestTimeout time.Duration
 	maxConcurrency int
@@ -48,17 +49,26 @@ type Poller struct {
 }
 
 // NewPoller constructs a quota poller.
-func NewPoller(manager *coreauth.Manager) *Poller {
+func NewPoller(manager *coreauth.Manager, store *quota.Store) *Poller {
 	if manager == nil {
 		return nil
 	}
 	return &Poller{
 		manager:        manager,
+		store:          store,
 		interval:       defaultPollInterval,
 		requestTimeout: defaultRequestTimeout,
 		maxConcurrency: maxConcurrentRequests,
 		aliasMap:       defaultAntigravityAliasMap(),
 	}
+}
+
+// Store returns the quota store used by this poller.
+func (p *Poller) Store() *quota.Store {
+	if p == nil {
+		return nil
+	}
+	return p.store
 }
 
 // SetConfig updates the alias map used for antigravity model matching.
@@ -314,7 +324,18 @@ func (p *Poller) aliasSnapshot() map[string]string {
 }
 
 func (p *Poller) persistQuota(ctx context.Context, auth *coreauth.Auth, provider string, models map[string]quota.ModelQuota) {
-	if p == nil || p.manager == nil || auth == nil || len(models) == 0 {
+	if p == nil || auth == nil || len(models) == 0 {
+		return
+	}
+	if p.store != nil {
+		if p.store.Set(auth.ID, provider, models, time.Now().UTC()) {
+			if err := p.store.Flush(); err != nil {
+				log.WithError(err).Warnf("quota poller: flush store failed (auth=%s)", auth.ID)
+			}
+		}
+		return
+	}
+	if p.manager == nil {
 		return
 	}
 	updated := auth.Clone()

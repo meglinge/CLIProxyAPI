@@ -11,7 +11,9 @@ import (
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/quota"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
 
 // Builder constructs a Service instance with customizable providers.
@@ -193,6 +195,7 @@ func (b *Builder) Build() (*Service, error) {
 	accessManager.SetProviders(providers)
 
 	coreManager := b.coreManager
+	var quotaStore *quota.Store
 	if coreManager == nil {
 		tokenStore := sdkAuth.GetTokenStore()
 		if dirSetter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok && b.cfg != nil {
@@ -203,17 +206,28 @@ func (b *Builder) Build() (*Service, error) {
 		if b.cfg != nil {
 			strategy = strings.ToLower(strings.TrimSpace(b.cfg.Routing.Strategy))
 		}
+
+		var qs *quota.Store
+		if strategy == "quota-weighted" || strategy == "quota-weight" || strategy == "quota" || strategy == "qw" {
+			var storeErr error
+			qs, storeErr = quota.NewStore("")
+			if storeErr != nil {
+				log.WithError(storeErr).Warn("failed to create quota store, falling back to metadata storage")
+			}
+		}
+
 		var selector coreauth.Selector
 		switch strategy {
 		case "fill-first", "fillfirst", "ff":
 			selector = &coreauth.FillFirstSelector{}
 		case "quota-weighted", "quota-weight", "quota", "qw":
-			selector = coreauth.NewQuotaWeightedSelector()
+			selector = coreauth.NewQuotaWeightedSelectorWithStore(qs)
 		default:
 			selector = &coreauth.RoundRobinSelector{}
 		}
 
 		coreManager = coreauth.NewManager(tokenStore, selector, nil)
+		quotaStore = qs
 	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
@@ -231,6 +245,7 @@ func (b *Builder) Build() (*Service, error) {
 		accessManager:  accessManager,
 		coreManager:    coreManager,
 		serverOptions:  append([]api.ServerOption(nil), b.serverOptions...),
+		quotaStore:     quotaStore,
 	}
 	return service, nil
 }

@@ -23,6 +23,7 @@ import (
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/quota"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
@@ -93,6 +94,8 @@ type Service struct {
 	quotaPoller *internalquota.Poller
 	// quotaPollerCancel stops the quota poller loop.
 	quotaPollerCancel context.CancelFunc
+	// quotaStore stores quota data in a separate file.
+	quotaStore *quota.Store
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -548,7 +551,11 @@ func (s *Service) Run(ctx context.Context) error {
 			case "fill-first":
 				selector = &coreauth.FillFirstSelector{}
 			case "quota-weighted":
-				selector = coreauth.NewQuotaWeightedSelector()
+				qwSelector := coreauth.NewQuotaWeightedSelector()
+				if s.quotaStore != nil {
+					qwSelector.SetStore(s.quotaStore)
+				}
+				selector = qwSelector
 			default:
 				selector = &coreauth.RoundRobinSelector{}
 			}
@@ -601,7 +608,14 @@ func (s *Service) Run(ctx context.Context) error {
 		s.registerAntigravityQuotaRefresh()
 	}
 	if s.coreManager != nil && s.quotaPoller == nil {
-		s.quotaPoller = internalquota.NewPoller(s.coreManager)
+		if s.quotaStore == nil {
+			var storeErr error
+			s.quotaStore, storeErr = quota.NewStore("")
+			if storeErr != nil {
+				log.WithError(storeErr).Warn("failed to create quota store, falling back to metadata storage")
+			}
+		}
+		s.quotaPoller = internalquota.NewPoller(s.coreManager, s.quotaStore)
 		if s.quotaPoller != nil {
 			s.quotaPoller.SetConfig(s.cfg)
 			pollCtx, cancel := context.WithCancel(context.Background())
