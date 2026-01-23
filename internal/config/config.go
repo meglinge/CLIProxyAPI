@@ -18,7 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+const DefaultPanelGitHubRepository = "https://github.com/meglinge/Cli-Proxy-API-Management-Center"
 
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
