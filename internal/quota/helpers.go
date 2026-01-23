@@ -124,6 +124,9 @@ func extractAntigravityQuota(payload []byte, aliasMap map[string]string) map[str
 		}
 		entry := quota.ModelQuota{Percent: percent, ResetTime: resetTime}
 		addModelQuota(result, name, entry)
+		if derived := antigravityDerivedAlias(name); derived != "" {
+			addModelQuota(result, derived, entry)
+		}
 		if aliasMap != nil {
 			if alias := strings.TrimSpace(aliasMap[strings.ToLower(name)]); alias != "" {
 				addModelQuota(result, alias, entry)
@@ -131,6 +134,89 @@ func extractAntigravityQuota(payload []byte, aliasMap map[string]string) map[str
 		}
 	}
 	return result
+}
+
+// antigravityDerivedAlias maps internal antigravity model IDs (e.g. model_claude_4_5_sonnet)
+// to user-facing model names (e.g. claude-sonnet-4-5).
+func antigravityDerivedAlias(name string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(name))
+	if !strings.HasPrefix(trimmed, "model_") {
+		return ""
+	}
+	parts := strings.Split(strings.TrimPrefix(trimmed, "model_"), "_")
+	if len(parts) < 2 {
+		return ""
+	}
+	switch parts[0] {
+	case "claude":
+		return buildClaudeAlias(parts[1:])
+	case "google":
+		if len(parts) >= 3 && parts[1] == "gemini" {
+			return buildGeminiAlias(parts[2:])
+		}
+	case "openai":
+		if len(parts) >= 2 {
+			return strings.Join(parts[1:], "-")
+		}
+	}
+	return ""
+}
+
+func buildClaudeAlias(parts []string) string {
+	if len(parts) < 2 {
+		return ""
+	}
+	thinking := false
+	if parts[len(parts)-1] == "thinking" {
+		thinking = true
+		parts = parts[:len(parts)-1]
+	}
+	if len(parts) < 2 {
+		return ""
+	}
+	variant := parts[len(parts)-1]
+	versionParts := parts[:len(parts)-1]
+	if variant == "" || len(versionParts) == 0 {
+		return ""
+	}
+	alias := "claude-" + variant + "-" + strings.Join(versionParts, "-")
+	if thinking {
+		alias += "-thinking"
+	}
+	return alias
+}
+
+func buildGeminiAlias(parts []string) string {
+	if len(parts) < 2 {
+		return ""
+	}
+	versionParts := make([]string, 0, len(parts))
+	idx := 0
+	for idx < len(parts) && isNumeric(parts[idx]) {
+		versionParts = append(versionParts, parts[idx])
+		idx++
+	}
+	if len(versionParts) == 0 || idx >= len(parts) {
+		return ""
+	}
+	version := strings.Join(versionParts, ".")
+	variant := strings.Join(parts[idx:], "-")
+	if variant == "" {
+		return ""
+	}
+	return "gemini-" + version + "-" + variant
+}
+
+func isNumeric(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func extractGeminiQuota(payload []byte) map[string]quota.ModelQuota {
