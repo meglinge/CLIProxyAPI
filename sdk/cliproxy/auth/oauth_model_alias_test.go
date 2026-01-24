@@ -175,3 +175,37 @@ func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "gemini-2.5-pro-exp-03-25(8192)")
 	}
 }
+
+func TestApplyOAuthModelAlias_DefaultAntigravity(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(nil)
+
+	auth := &Auth{ID: "antigravity-auth", Provider: "antigravity"}
+	resolved := mgr.applyOAuthModelAlias(auth, "gemini-3-pro-preview")
+	if resolved != "gemini-3-pro-high" {
+		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolved, "gemini-3-pro-high")
+	}
+}
+
+func TestResolveModelFromCandidates_DateAndThinkingFallback(t *testing.T) {
+	t.Parallel()
+
+	models := []string{
+		"claude-opus-4-5-thinking",
+		"claude-sonnet-4-5-20250929",
+		"gemini-3-pro-preview",
+	}
+
+	got := resolveModelFromCandidates("claude-opus-4-5-20251101", models)
+	if got != "claude-opus-4-5-thinking" {
+		t.Errorf("resolveModelFromCandidates() = %q, want %q", got, "claude-opus-4-5-thinking")
+	}
+
+	got = resolveModelFromCandidates("claude-sonnet-4-5-20250101", models)
+	if got != "claude-sonnet-4-5-20250929" {
+		t.Errorf("resolveModelFromCandidates() = %q, want %q", got, "claude-sonnet-4-5-20250929")
+	}
+}

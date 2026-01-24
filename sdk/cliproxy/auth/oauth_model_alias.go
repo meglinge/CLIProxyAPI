@@ -73,7 +73,7 @@ func (m *Manager) SetOAuthModelAlias(aliases map[string][]internalconfig.OAuthMo
 // applyOAuthModelAlias resolves the upstream model from OAuth model alias.
 // If an alias exists, the returned model is the upstream model.
 func (m *Manager) applyOAuthModelAlias(auth *Auth, requestedModel string) string {
-	upstreamModel := m.resolveOAuthUpstreamModel(auth, requestedModel)
+	upstreamModel := m.resolveOAuthUpstreamModelWithFallback(auth, requestedModel, nil)
 	if upstreamModel == "" {
 		return requestedModel
 	}

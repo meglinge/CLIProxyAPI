@@ -1646,7 +1646,10 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			continue
 		}
 		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
-			continue
+			resolved := m.resolveOAuthUpstreamModelWithFallback(candidate, model, registryRef)
+			if resolved == "" || !registryRef.ClientSupportsModel(candidate.ID, resolved) {
+				continue
+			}
 		}
 		candidates = append(candidates, candidate)
 	}
@@ -1718,7 +1721,10 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			continue
 		}
 		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
-			continue
+			resolved := m.resolveOAuthUpstreamModelWithFallback(candidate, model, registryRef)
+			if resolved == "" || !registryRef.ClientSupportsModel(candidate.ID, resolved) {
+				continue
+			}
 		}
 		candidates = append(candidates, candidate)
 	}
