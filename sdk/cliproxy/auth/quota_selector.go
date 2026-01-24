@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/quota"
 )
@@ -127,16 +128,30 @@ func (s *QuotaWeightedSelector) weightFor(auth *Auth, model string) int {
 	if strings.TrimSpace(lookupModel) == "" {
 		lookupModel = "*"
 	}
-	if s.store != nil {
-		if percent, ok := s.store.GetPercent(auth.ID, lookupModel); ok {
+	if percent, ok := s.lookupPercent(auth, lookupModel); ok {
+		return percentToWeight(percent)
+	}
+
+	base := stripDateSuffix(lookupModel)
+	if base != lookupModel {
+		if percent, ok := s.lookupPercent(auth, base); ok {
+			return percentToWeight(percent)
+		}
+		if !strings.Contains(base, "thinking") {
+			if percent, ok := s.lookupPercent(auth, base+"-thinking"); ok {
+				return percentToWeight(percent)
+			}
+		}
+	}
+
+	if strings.EqualFold(auth.Provider, "antigravity") && lookupModel != "*" {
+		groupModels := registry.GetAntigravityQuotaGroupModels(lookupModel)
+		if percent, ok := s.lookupGroupPercent(auth, groupModels); ok {
 			return percentToWeight(percent)
 		}
 	}
-	percent, ok := quota.GetPercentFromMetadata(auth.Metadata, lookupModel)
-	if !ok {
-		return quotaUnknownWeight
-	}
-	return percentToWeight(percent)
+
+	return quotaUnknownWeight
 }
 
 func percentToWeight(percent float64) int {
@@ -151,4 +166,75 @@ func percentToWeight(percent float64) int {
 		return 0
 	}
 	return weight
+}
+
+func (s *QuotaWeightedSelector) lookupPercent(auth *Auth, model string) (float64, bool) {
+	if auth == nil {
+		return 0, false
+	}
+	if s != nil && s.store != nil {
+		if percent, ok := s.store.GetPercent(auth.ID, model); ok {
+			return percent, true
+		}
+	}
+	return quota.GetPercentFromMetadata(auth.Metadata, model)
+}
+
+func (s *QuotaWeightedSelector) lookupGroupPercent(auth *Auth, models []string) (float64, bool) {
+	if auth == nil || len(models) == 0 {
+		return 0, false
+	}
+	found := false
+	min := 0.0
+	for _, model := range models {
+		if model == "" {
+			continue
+		}
+		if percent, ok := s.lookupPercent(auth, model); ok {
+			if !found || percent < min {
+				min = percent
+				found = true
+			}
+			continue
+		}
+		if strings.HasSuffix(model, "-thinking") {
+			base := strings.TrimSuffix(model, "-thinking")
+			if base != "" {
+				if percent, ok := s.lookupPercent(auth, base); ok {
+					if !found || percent < min {
+						min = percent
+						found = true
+					}
+				}
+			}
+		}
+	}
+	if !found {
+		return 0, false
+	}
+	return min, true
+}
+
+func stripDateSuffix(model string) string {
+	if model == "" {
+		return model
+	}
+	parts := strings.Split(model, "-")
+	if len(parts) < 2 {
+		return model
+	}
+	last := parts[len(parts)-1]
+	if len(last) != 8 || !isAllDigits(last) {
+		return model
+	}
+	return strings.Join(parts[:len(parts)-1], "-")
+}
+
+func isAllDigits(value string) bool {
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return value != ""
 }
