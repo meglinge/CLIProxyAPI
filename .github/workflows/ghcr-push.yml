@@ -2,8 +2,8 @@ name: Build and Push to GHCR
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 env:
@@ -40,9 +40,9 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
+            type=ref,event=tag
             type=raw,value=latest
             type=sha,prefix=
-            type=raw,value={{date 'YYYYMMDD-HHmmss'}}
 
       - name: Generate Build Metadata
         run: |
