@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	quotaWeightScale   = 100
-	quotaUnknownWeight = 100
+	quotaUnknownWeight = 0
+	quotaWeightPower   = 3
 )
 
 type quotaCursor struct {
@@ -161,7 +161,7 @@ func percentToWeight(percent float64) int {
 	if percent > 100 {
 		percent = 100
 	}
-	weight := int(math.Round(percent * quotaWeightScale))
+	weight := int(math.Round(math.Pow(percent, quotaWeightPower)))
 	if weight < 0 {
 		return 0
 	}
