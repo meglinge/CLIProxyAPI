@@ -352,6 +352,19 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 				emailValue := gjson.GetBytes(data, "email").String()
 				fileData["type"] = typeValue
 				fileData["email"] = emailValue
+				// Extract tags array
+				tagsResult := gjson.GetBytes(data, "tags")
+				if tagsResult.Exists() && tagsResult.IsArray() {
+					var tags []string
+					for _, t := range tagsResult.Array() {
+						if s := strings.TrimSpace(t.String()); s != "" {
+							tags = append(tags, s)
+						}
+					}
+					if len(tags) > 0 {
+						fileData["tags"] = tags
+					}
+				}
 			}
 
 			files = append(files, fileData)
@@ -446,6 +459,35 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 			}
 		}
 		entry["model_states"] = modelStates
+	}
+	// Extract tags from file metadata
+	if auth.Metadata != nil {
+		if rawTags, ok := auth.Metadata["tags"]; ok {
+			var tags []string
+			switch v := rawTags.(type) {
+			case []any:
+				tags = make([]string, 0, len(v))
+				for _, t := range v {
+					if s, ok := t.(string); ok {
+						s = strings.TrimSpace(s)
+						if s != "" {
+							tags = append(tags, s)
+						}
+					}
+				}
+			case []string:
+				tags = make([]string, 0, len(v))
+				for _, s := range v {
+					s = strings.TrimSpace(s)
+					if s != "" {
+						tags = append(tags, s)
+					}
+				}
+			}
+			if len(tags) > 0 {
+				entry["tags"] = tags
+			}
+		}
 	}
 	return entry
 }
