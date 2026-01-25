@@ -25,16 +25,6 @@ func (m *Manager) resolveOAuthUpstreamModelWithFallback(auth *Auth, requestedMod
 		return ""
 	}
 
-	if reg == nil {
-		reg = registry.GetGlobalRegistry()
-	}
-	if reg != nil {
-		normalized := normalizeRequestedModel(requestedModel)
-		if normalized != "" && reg.ClientSupportsModel(auth.ID, normalized) {
-			return ""
-		}
-	}
-
 	if upstream := m.resolveOAuthUpstreamModel(auth, requestedModel); upstream != "" {
 		return upstream
 	}
