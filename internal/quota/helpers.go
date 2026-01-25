@@ -14,13 +14,13 @@ import (
 )
 
 var defaultAntigravityAliases = map[string]string{
-	"rev19-uic3-1p":               "gemini-2.5-computer-use-preview-10-2025",
-	"gemini-3-pro-image":          "gemini-3-pro-image-preview",
-	"gemini-3-pro-high":           "gemini-3-pro-preview",
-	"gemini-3-flash":              "gemini-3-flash-preview",
-	"claude-sonnet-4-5":           "gemini-claude-sonnet-4-5",
-	"claude-sonnet-4-5-thinking":  "gemini-claude-sonnet-4-5-thinking",
-	"claude-opus-4-5-thinking":    "gemini-claude-opus-4-5-thinking",
+	"rev19-uic3-1p":              "gemini-2.5-computer-use-preview-10-2025",
+	"gemini-3-pro-image":         "gemini-3-pro-image-preview",
+	"gemini-3-pro-high":          "gemini-3-pro-preview",
+	"gemini-3-flash":             "gemini-3-flash-preview",
+	"claude-sonnet-4-5":          "gemini-claude-sonnet-4-5",
+	"claude-sonnet-4-5-thinking": "gemini-claude-sonnet-4-5-thinking",
+	"claude-opus-4-5-thinking":   "gemini-claude-opus-4-5-thinking",
 }
 
 func defaultAntigravityAliasMap() map[string]string {
@@ -100,9 +100,6 @@ func extractAntigravityQuota(payload []byte, aliasMap map[string]string) map[str
 	for key, raw := range models {
 		record, ok := raw.(map[string]any)
 		if !ok {
-			continue
-		}
-		if _, okProvider := record["modelProvider"]; !okProvider {
 			continue
 		}
 		info, ok := record["quotaInfo"].(map[string]any)
