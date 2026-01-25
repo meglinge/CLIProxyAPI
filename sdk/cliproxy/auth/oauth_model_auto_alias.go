@@ -68,8 +68,9 @@ func defaultOAuthAliasMap(channel string) map[string]string {
 		"gemini-3-pro-image-preview":             "gemini-3-pro-image",
 		"gemini-3-pro-preview":                   "gemini-3-pro-high",
 		"gemini-3-flash-preview":                 "gemini-3-flash",
-		"gemini-claude-sonnet-4-5":               "claude-sonnet-4-5",
+		"gemini-claude-sonnet-4-5":               "claude-sonnet-4-5-thinking",
 		"gemini-claude-sonnet-4-5-thinking":      "claude-sonnet-4-5-thinking",
+		"gemini-claude-opus-4-5":                 "claude-opus-4-5-thinking",
 		"gemini-claude-opus-4-5-thinking":        "claude-opus-4-5-thinking",
 	}
 }
@@ -137,6 +138,16 @@ func resolveModelFromCandidates(requestedModel string, models []string) string {
 	base := stripDateSuffix(normalized)
 	if base != normalized {
 		if matched := matchExactModel(models, base); matched != "" {
+			return matched
+		}
+	}
+	// For Claude models with date suffixes, prefer thinking variants if available.
+	if strings.HasPrefix(strings.ToLower(base), "claude-") && !strings.HasSuffix(strings.ToLower(base), "-thinking") {
+		alt := base + "-thinking"
+		if matched := matchExactModel(models, alt); matched != "" {
+			return matched
+		}
+		if matched := matchLatestDatedModel(models, alt); matched != "" {
 			return matched
 		}
 	}
