@@ -112,9 +112,10 @@ func extractAntigravityQuota(payload []byte, aliasMap map[string]string) map[str
 		}
 		percent := clampPercent(remaining * 100)
 		resetTime := parseResetTime(info["resetTime"])
-		name := normalizeString(record["model"])
+		// Prefer the map key (user-facing model id) to avoid placeholder-only IDs.
+		name := strings.TrimSpace(key)
 		if name == "" {
-			name = strings.TrimSpace(key)
+			name = normalizeString(record["model"])
 		}
 		if name == "" {
 			continue
