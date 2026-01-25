@@ -609,9 +609,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
+	activeProviders := append([]string(nil), providers...)
 	var lastErr error
 	for {
-		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
+		auth, executor, provider, errPick := m.pickNextMixed(ctx, activeProviders, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
@@ -648,6 +649,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			m.MarkResult(execCtx, result)
 			lastErr = errExec
+			if shouldSkipProviderOnError(provider, errExec) {
+				activeProviders = dropProvider(activeProviders, provider)
+				log.Debugf("skipping provider %s for model %s after non-retriable error", provider, routeModel)
+			}
 			continue
 		}
 		m.MarkResult(execCtx, result)
@@ -662,9 +667,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
+	activeProviders := append([]string(nil), providers...)
 	var lastErr error
 	for {
-		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
+		auth, executor, provider, errPick := m.pickNextMixed(ctx, activeProviders, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
@@ -701,6 +707,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			m.MarkResult(execCtx, result)
 			lastErr = errExec
+			if shouldSkipProviderOnError(provider, errExec) {
+				activeProviders = dropProvider(activeProviders, provider)
+				log.Debugf("skipping provider %s for model %s after non-retriable error", provider, routeModel)
+			}
 			continue
 		}
 		m.MarkResult(execCtx, result)
@@ -715,9 +725,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
+	activeProviders := append([]string(nil), providers...)
 	var lastErr error
 	for {
-		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
+		auth, executor, provider, errPick := m.pickNextMixed(ctx, activeProviders, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
 				return nil, lastErr
@@ -752,6 +763,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(execCtx, result)
 			lastErr = errStream
+			if shouldSkipProviderOnError(provider, errStream) {
+				activeProviders = dropProvider(activeProviders, provider)
+				log.Debugf("skipping provider %s for model %s after non-retriable error", provider, routeModel)
+			}
 			continue
 		}
 		out := make(chan cliproxyexecutor.StreamChunk)
@@ -1143,6 +1158,29 @@ func waitForCooldown(ctx context.Context, wait time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+func shouldSkipProviderOnError(provider string, err error) bool {
+	_ = provider
+	status := statusCodeFromError(err)
+	if status == http.StatusNotFound {
+		return true
+	}
+	return false
+}
+
+func dropProvider(providers []string, provider string) []string {
+	if provider == "" || len(providers) == 0 {
+		return providers
+	}
+	out := make([]string, 0, len(providers))
+	for _, p := range providers {
+		if strings.EqualFold(strings.TrimSpace(p), provider) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // MarkResult records an execution result and notifies hooks.
