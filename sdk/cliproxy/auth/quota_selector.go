@@ -15,6 +15,8 @@ import (
 const (
 	quotaUnknownWeight = 0
 	quotaWeightPower   = 3
+	quotaResetBoost    = 0.25
+	quotaResetTau      = 48 * time.Hour
 )
 
 type quotaCursor struct {
@@ -67,15 +69,30 @@ func (s *QuotaWeightedSelector) Pick(ctx context.Context, provider, model string
 		return rr.Pick(ctx, provider, model, opts, auths)
 	}
 
-	weights := make([]int, len(available))
+	candidates := make([]*Auth, 0, len(available))
+	weights := make([]int, 0, len(available))
 	totalWeight := 0
-	for i, candidate := range available {
-		weight := s.weightFor(candidate, model)
-		weights[i] = weight
+	unknownCount := 0
+	for _, candidate := range available {
+		weight, known := s.weightFor(candidate, model, now)
+		if known && weight <= 0 {
+			continue
+		}
+		if !known {
+			unknownCount++
+		}
+		candidates = append(candidates, candidate)
+		weights = append(weights, weight)
 		totalWeight += weight
 	}
+	if len(candidates) == 0 {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
 	if totalWeight <= 0 {
-		return s.fallback.Pick(ctx, provider, model, opts, auths)
+		if unknownCount > 0 {
+			return s.fallback.Pick(ctx, provider, model, opts, candidates)
+		}
+		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 
 	key := provider + ":" + quota.NormalizeModelKey(model)
@@ -91,7 +108,7 @@ func (s *QuotaWeightedSelector) Pick(ctx context.Context, provider, model string
 	bestIdx := 0
 	bestScore := 0
 	bestScoreSet := false
-	for i, candidate := range available {
+	for i, candidate := range candidates {
 		cursor := state[candidate.ID]
 		if cursor == nil {
 			cursor = &quotaCursor{}
@@ -104,10 +121,10 @@ func (s *QuotaWeightedSelector) Pick(ctx context.Context, provider, model string
 			bestScoreSet = true
 		}
 	}
-	state[available[bestIdx].ID].current -= totalWeight
-	if len(state) > len(available) {
-		live := make(map[string]struct{}, len(available))
-		for _, candidate := range available {
+	state[candidates[bestIdx].ID].current -= totalWeight
+	if len(state) > len(candidates) {
+		live := make(map[string]struct{}, len(candidates))
+		for _, candidate := range candidates {
 			live[candidate.ID] = struct{}{}
 		}
 		for id := range state {
@@ -117,100 +134,126 @@ func (s *QuotaWeightedSelector) Pick(ctx context.Context, provider, model string
 		}
 	}
 	s.mu.Unlock()
-	return available[bestIdx], nil
+	return candidates[bestIdx], nil
 }
 
-func (s *QuotaWeightedSelector) weightFor(auth *Auth, model string) int {
+func (s *QuotaWeightedSelector) weightFor(auth *Auth, model string, now time.Time) (int, bool) {
 	if auth == nil {
-		return quotaUnknownWeight
+		return quotaUnknownWeight, false
 	}
 	lookupModel := model
 	if strings.TrimSpace(lookupModel) == "" {
 		lookupModel = "*"
 	}
-	if percent, ok := s.lookupPercent(auth, lookupModel); ok {
-		return percentToWeight(percent)
+	if entry, ok := s.lookupQuota(auth, lookupModel); ok {
+		return quotaToWeight(entry, now), true
 	}
-
-	base := stripDateSuffix(lookupModel)
-	if base != lookupModel {
-		if percent, ok := s.lookupPercent(auth, base); ok {
-			return percentToWeight(percent)
-		}
-		if !strings.Contains(base, "thinking") {
-			if percent, ok := s.lookupPercent(auth, base+"-thinking"); ok {
-				return percentToWeight(percent)
-			}
-		}
-	}
-
-	if strings.EqualFold(auth.Provider, "antigravity") && lookupModel != "*" {
-		groupModels := registry.GetAntigravityQuotaGroupModels(lookupModel)
-		if percent, ok := s.lookupGroupPercent(auth, groupModels); ok {
-			return percentToWeight(percent)
-		}
-	}
-
-	return quotaUnknownWeight
+	return quotaUnknownWeight, false
 }
 
-func percentToWeight(percent float64) int {
+func quotaToWeight(entry quota.ModelQuota, now time.Time) int {
+	percent := entry.Percent
 	if percent <= 0 {
 		return 0
 	}
 	if percent > 100 {
 		percent = 100
 	}
-	weight := int(math.Round(math.Pow(percent, quotaWeightPower)))
+	base := math.Pow(percent, quotaWeightPower)
+	if base <= 0 {
+		return 0
+	}
+	factor := 1.0
+	if !entry.ResetTime.IsZero() {
+		remaining := entry.ResetTime.Sub(now)
+		if remaining < 0 {
+			remaining = 0
+		}
+		timeScore := math.Exp(-remaining.Seconds() / quotaResetTau.Seconds())
+		factor += quotaResetBoost * timeScore
+	}
+	weight := int(math.Round(base * factor))
 	if weight < 0 {
 		return 0
 	}
 	return weight
 }
 
-func (s *QuotaWeightedSelector) lookupPercent(auth *Auth, model string) (float64, bool) {
+func (s *QuotaWeightedSelector) lookupQuota(auth *Auth, model string) (quota.ModelQuota, bool) {
 	if auth == nil {
-		return 0, false
+		return quota.ModelQuota{}, false
 	}
-	if s != nil && s.store != nil {
-		if percent, ok := s.store.GetPercent(auth.ID, model); ok {
-			return percent, true
+	if entry, ok := s.lookupModelQuota(auth, model); ok {
+		return entry, true
+	}
+
+	base := stripDateSuffix(model)
+	if base != model {
+		if entry, ok := s.lookupModelQuota(auth, base); ok {
+			return entry, true
+		}
+		if !strings.Contains(base, "thinking") {
+			if entry, ok := s.lookupModelQuota(auth, base+"-thinking"); ok {
+				return entry, true
+			}
 		}
 	}
-	return quota.GetPercentFromMetadata(auth.Metadata, model)
+
+	if strings.EqualFold(auth.Provider, "antigravity") && model != "*" {
+		groupModels := registry.GetAntigravityQuotaGroupModels(model)
+		if entry, ok := s.lookupGroupQuota(auth, groupModels); ok {
+			return entry, true
+		}
+	}
+
+	return quota.ModelQuota{}, false
 }
 
-func (s *QuotaWeightedSelector) lookupGroupPercent(auth *Auth, models []string) (float64, bool) {
+func (s *QuotaWeightedSelector) lookupModelQuota(auth *Auth, model string) (quota.ModelQuota, bool) {
+	if auth == nil {
+		return quota.ModelQuota{}, false
+	}
+	if s != nil && s.store != nil {
+		if entry, ok := s.store.GetModelQuota(auth.ID, model); ok {
+			return entry, true
+		}
+	}
+	return quota.GetModelQuotaFromMetadata(auth.Metadata, model)
+}
+
+func (s *QuotaWeightedSelector) lookupGroupQuota(auth *Auth, models []string) (quota.ModelQuota, bool) {
 	if auth == nil || len(models) == 0 {
-		return 0, false
+		return quota.ModelQuota{}, false
 	}
 	found := false
-	min := 0.0
+	var min quota.ModelQuota
 	for _, model := range models {
 		if model == "" {
 			continue
 		}
-		if percent, ok := s.lookupPercent(auth, model); ok {
-			if !found || percent < min {
-				min = percent
-				found = true
-			}
-			continue
-		}
-		if strings.HasSuffix(model, "-thinking") {
+		entry, ok := s.lookupModelQuota(auth, model)
+		if !ok && strings.HasSuffix(model, "-thinking") {
 			base := strings.TrimSuffix(model, "-thinking")
 			if base != "" {
-				if percent, ok := s.lookupPercent(auth, base); ok {
-					if !found || percent < min {
-						min = percent
-						found = true
-					}
-				}
+				entry, ok = s.lookupModelQuota(auth, base)
+			}
+		}
+		if !ok {
+			continue
+		}
+		if !found || entry.Percent < min.Percent {
+			min = entry
+			found = true
+			continue
+		}
+		if entry.Percent == min.Percent && !entry.ResetTime.IsZero() {
+			if min.ResetTime.IsZero() || entry.ResetTime.Before(min.ResetTime) {
+				min = entry
 			}
 		}
 	}
 	if !found {
-		return 0, false
+		return quota.ModelQuota{}, false
 	}
 	return min, true
 }

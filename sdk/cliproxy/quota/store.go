@@ -92,6 +92,34 @@ func (s *Store) GetPercent(authID, model string) (float64, bool) {
 	return 0, false
 }
 
+func (s *Store) GetModelQuota(authID, model string) (ModelQuota, bool) {
+	if s == nil {
+		return ModelQuota{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.data == nil || s.data.AuthQuotas == nil {
+		return ModelQuota{}, false
+	}
+	entry, ok := s.data.AuthQuotas[authID]
+	if !ok || entry == nil || entry.Models == nil {
+		return ModelQuota{}, false
+	}
+	lookup := NormalizeModelKey(model)
+	if lookup == "" {
+		lookup = "*"
+	}
+	if mq, ok := entry.Models[lookup]; ok {
+		mq.Percent = clampPercent(mq.Percent)
+		return mq, true
+	}
+	if mq, ok := entry.Models["*"]; ok {
+		mq.Percent = clampPercent(mq.Percent)
+		return mq, true
+	}
+	return ModelQuota{}, false
+}
+
 func (s *Store) GetEntry(authID string) (*StoreEntry, bool) {
 	if s == nil {
 		return nil, false

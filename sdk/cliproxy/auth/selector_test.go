@@ -8,6 +8,7 @@ import (
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/quota"
 )
 
 func TestFillFirstSelectorPick_Deterministic(t *testing.T) {
@@ -173,5 +174,56 @@ func TestRoundRobinSelectorPick_Concurrent(t *testing.T) {
 	case err := <-errCh:
 		t.Fatalf("concurrent Pick() error = %v", err)
 	default:
+	}
+}
+
+func TestQuotaWeightedSelectorWeight_ResetTimeBoost(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 1, 24, 12, 0, 0, 0, time.UTC)
+	model := "claude-opus-4-5-20251101"
+	soon := &Auth{ID: "soon", Provider: "antigravity", Metadata: map[string]any{}}
+	later := &Auth{ID: "later", Provider: "antigravity", Metadata: map[string]any{}}
+
+	quota.UpdateMetadata(soon.Metadata, "antigravity", map[string]quota.ModelQuota{
+		model: {Percent: 60, ResetTime: now.Add(2 * time.Hour)},
+	}, now)
+	quota.UpdateMetadata(later.Metadata, "antigravity", map[string]quota.ModelQuota{
+		model: {Percent: 60, ResetTime: now.Add(5 * 24 * time.Hour)},
+	}, now)
+
+	selector := &QuotaWeightedSelector{}
+	weightSoon, okSoon := selector.weightFor(soon, model, now)
+	weightLater, okLater := selector.weightFor(later, model, now)
+	if !okSoon || !okLater {
+		t.Fatalf("expected quota entries to be found")
+	}
+	if weightSoon <= weightLater {
+		t.Fatalf("expected nearer reset to have higher weight: %d <= %d", weightSoon, weightLater)
+	}
+}
+
+func TestQuotaWeightedSelectorPick_SkipZeroPercent(t *testing.T) {
+	t.Parallel()
+
+	model := "claude-sonnet-4-5"
+	zeroA := &Auth{ID: "zero-a", Provider: "antigravity", Metadata: map[string]any{}}
+	zeroB := &Auth{ID: "zero-b", Provider: "antigravity", Metadata: map[string]any{}}
+
+	quota.UpdateMetadata(zeroA.Metadata, "antigravity", map[string]quota.ModelQuota{
+		model: {Percent: 0},
+	}, time.Now())
+	quota.UpdateMetadata(zeroB.Metadata, "antigravity", map[string]quota.ModelQuota{
+		model: {Percent: 0},
+	}, time.Now())
+
+	selector := &QuotaWeightedSelector{}
+	_, err := selector.Pick(context.Background(), "antigravity", model, cliproxyexecutor.Options{}, []*Auth{zeroA, zeroB})
+	if err == nil {
+		t.Fatalf("expected error when all quotas are zero")
+	}
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr.Code != "auth_not_found" {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

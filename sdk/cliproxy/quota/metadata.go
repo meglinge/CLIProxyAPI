@@ -23,36 +23,44 @@ const quotaEqualEpsilon = 0.0001
 
 // GetPercentFromMetadata returns the stored quota percentage for a model.
 func GetPercentFromMetadata(metadata map[string]any, model string) (float64, bool) {
+	if entry, ok := GetModelQuotaFromMetadata(metadata, model); ok {
+		return clampPercent(entry.Percent), true
+	}
+	return 0, false
+}
+
+// GetModelQuotaFromMetadata returns the stored quota entry for a model.
+func GetModelQuotaFromMetadata(metadata map[string]any, model string) (ModelQuota, bool) {
 	if metadata == nil {
-		return 0, false
+		return ModelQuota{}, false
 	}
 	rawSnapshot, ok := metadata[MetadataKey]
 	if !ok {
-		return 0, false
+		return ModelQuota{}, false
 	}
 	snapshot, ok := rawSnapshot.(map[string]any)
 	if !ok {
-		return 0, false
+		return ModelQuota{}, false
 	}
 	rawModels, ok := snapshot[metadataModelsKey].(map[string]any)
 	if !ok {
-		return 0, false
+		return ModelQuota{}, false
 	}
 	lookup := NormalizeModelKey(model)
 	if lookup == "" {
 		lookup = "*"
 	}
 	if entry, ok := rawModels[lookup]; ok {
-		if percent, ok := readPercent(entry); ok {
-			return clampPercent(percent), true
+		if quotaEntry, ok := readModelQuota(entry); ok {
+			return quotaEntry, true
 		}
 	}
 	if entry, ok := rawModels["*"]; ok {
-		if percent, ok := readPercent(entry); ok {
-			return clampPercent(percent), true
+		if quotaEntry, ok := readModelQuota(entry); ok {
+			return quotaEntry, true
 		}
 	}
-	return 0, false
+	return ModelQuota{}, false
 }
 
 // UpdateMetadata writes quota snapshot into the metadata map.
@@ -189,6 +197,24 @@ func readPercent(value any) (float64, bool) {
 		return readFloat(m[metadataPercentKey])
 	}
 	return readFloat(value)
+}
+
+func readModelQuota(value any) (ModelQuota, bool) {
+	if value == nil {
+		return ModelQuota{}, false
+	}
+	if m, ok := value.(map[string]any); ok {
+		percent, ok := readFloat(m[metadataPercentKey])
+		if !ok {
+			return ModelQuota{}, false
+		}
+		reset := parseTime(m[metadataResetKey])
+		return ModelQuota{Percent: clampPercent(percent), ResetTime: reset}, true
+	}
+	if percent, ok := readFloat(value); ok {
+		return ModelQuota{Percent: clampPercent(percent)}, true
+	}
+	return ModelQuota{}, false
 }
 
 func readFloat(value any) (float64, bool) {
