@@ -649,6 +649,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			m.MarkResult(execCtx, result)
 			lastErr = errExec
+			if shouldStopOnError(errExec) {
+				return cliproxyexecutor.Response{}, errExec
+			}
 			if shouldSkipProviderOnError(provider, errExec) {
 				activeProviders = dropProvider(activeProviders, provider)
 				log.Debugf("skipping provider %s for model %s after non-retriable error", provider, routeModel)
@@ -707,6 +710,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			m.MarkResult(execCtx, result)
 			lastErr = errExec
+			if shouldStopOnError(errExec) {
+				return cliproxyexecutor.Response{}, errExec
+			}
 			if shouldSkipProviderOnError(provider, errExec) {
 				activeProviders = dropProvider(activeProviders, provider)
 				log.Debugf("skipping provider %s for model %s after non-retriable error", provider, routeModel)
@@ -763,6 +769,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(execCtx, result)
 			lastErr = errStream
+			if shouldStopOnError(errStream) {
+				return nil, errStream
+			}
 			if shouldSkipProviderOnError(provider, errStream) {
 				activeProviders = dropProvider(activeProviders, provider)
 				log.Debugf("skipping provider %s for model %s after non-retriable error", provider, routeModel)
@@ -1167,6 +1176,20 @@ func shouldSkipProviderOnError(provider string, err error) bool {
 		return true
 	}
 	return false
+}
+
+func shouldStopOnError(err error) bool {
+	status := statusCodeFromError(err)
+	if status == 0 {
+		return false
+	}
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
+		return false
+	case http.StatusNotFound:
+		return false
+	}
+	return status >= http.StatusBadRequest && status < http.StatusInternalServerError
 }
 
 func dropProvider(providers []string, provider string) []string {
