@@ -671,9 +671,6 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		return e.executeWebSearchOnlyStream(ctx, auth, token, req, opts)
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
-
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
 
@@ -1614,153 +1611,7 @@ func generateProjectID() string {
 	return adj + "-" + noun + "-" + randomPart
 }
 
-// 通过 gemini-2.5-flash 的 googleSearch 为 Claude 模型提供 Web 搜索支持
-
-const webSearchGeminiModel = "gemini-2.5-flash"
-
-// googleURLRegex 用于匹配所有 google.com 相关的 URL
-var googleURLRegex = regexp.MustCompile(`https?://[a-zA-Z0-9.-]*google\.com[^\s]*`)
-
-// stripGoogleURLs 移除文本中所有 google.com 相关的 URL
-func stripGoogleURLs(text string) string {
-	return strings.TrimSpace(googleURLRegex.ReplaceAllString(text, ""))
-}
-
-// doWebSearchTool 检查原始请求中是否包含 web_search 工具
-func doWebSearchTool(payload []byte) bool {
-	tools := gjson.GetBytes(payload, "tools")
-	if !tools.IsArray() {
-		return false
-	}
-	for _, tool := range tools.Array() {
-		toolType := tool.Get("type").String()
-		if strings.HasPrefix(toolType, "web_search") {
-			return true
-		}
-	}
-	return false
-}
-
-// extractUserQuery 提取最后一条用户消息文本用于 Web 搜索
-func extractUserQuery(payload []byte) string {
-	messages := gjson.GetBytes(payload, "messages")
-	if !messages.IsArray() {
-		return ""
-	}
-	arr := messages.Array()
-	// 查找最后一条用户消息
-	for i := len(arr) - 1; i >= 0; i-- {
-		msg := arr[i]
-		if msg.Get("role").String() == "user" {
-			content := msg.Get("content")
-			if content.Type == gjson.String {
-				return content.String()
-			}
-			// 尝试数组格式
-			if content.IsArray() {
-				for _, item := range content.Array() {
-					if item.Get("type").String() == "text" {
-						return item.Get("text").String()
-					}
-				}
-			}
-		}
-	}
-	return ""
-}
-
-// executeGeminiWebSearch 使用 Gemini 的 googleSearch 工具执行 Web 搜索
-// 返回完整的响应体（包含文本和 groundingMetadata）
-func (e *AntigravityExecutor) executeGeminiWebSearch(ctx context.Context, auth *cliproxyauth.Auth, token, query string) ([]byte, error) {
-	if query == "" {
-		return nil, fmt.Errorf("empty query")
-	}
-
-	// 构建带有 googleSearch 工具的 Gemini 请求
-	geminiPayload := `{"model":"","request":{"contents":[],"tools":[{"googleSearch":{}}]}}`
-	geminiPayload, _ = sjson.Set(geminiPayload, "model", webSearchGeminiModel)
-	geminiPayload, _ = sjson.Set(geminiPayload, "request.contents.0.role", "user")
-	geminiPayload, _ = sjson.Set(geminiPayload, "request.contents.0.parts.0.text", query)
-
-	// 应用项目 ID
-	projectID := ""
-	if auth != nil && auth.Metadata != nil {
-		if pid, ok := auth.Metadata["project_id"].(string); ok {
-			projectID = strings.TrimSpace(pid)
-		}
-	}
-	geminiPayload = string(geminiToAntigravity(webSearchGeminiModel, []byte(geminiPayload), projectID))
-
-	baseURLs := antigravityBaseURLFallbackOrder(auth)
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-
-	for _, baseURL := range baseURLs {
-		base := strings.TrimSuffix(baseURL, "/")
-		requestURL := base + antigravityGeneratePath
-
-		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader([]byte(geminiPayload)))
-		if errReq != nil {
-			continue
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Authorization", "Bearer "+token)
-		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
-		httpReq.Header.Set("Accept", "application/json")
-		if host := resolveHost(base); host != "" {
-			httpReq.Host = host
-		}
-
-		httpResp, errDo := httpClient.Do(httpReq)
-		if errDo != nil {
-			log.Debugf("antigravity web search: request failed: %v", errDo)
-			continue
-		}
-
-		bodyBytes, errRead := io.ReadAll(httpResp.Body)
-		_ = httpResp.Body.Close()
-		if errRead != nil {
-			continue
-		}
-
-		if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-			log.Debugf("antigravity web search: upstream error status: %d", httpResp.StatusCode)
-			continue
-		}
-
-		log.Debugf("antigravity web search: got response for query: %s", query)
-		return bodyBytes, nil
-	}
-
-	return nil, fmt.Errorf("web search failed")
-}
-
-// executeWebSearchOnly 使用 Gemini 代替 Claude 处理 Web 搜索请求
-// 这是一个非流式实现，返回 Claude 格式的响应
-func (e *AntigravityExecutor) executeWebSearchOnly(ctx context.Context, auth *cliproxyauth.Auth, token string, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
-
-	query := extractUserQuery(req.Payload)
-	if query == "" {
-		reporter.publishFailure(ctx)
-		return cliproxyexecutor.Response{}, fmt.Errorf("no user query found for web search")
-	}
-
-	// 执行 Gemini Web 搜索
-	geminiResp, err := e.executeGeminiWebSearch(ctx, auth, token, query)
-	if err != nil {
-		reporter.publishFailure(ctx)
-		return cliproxyexecutor.Response{}, err
-	}
-
-	// 发布 Gemini 响应的 usage 统计
-	reporter.publish(ctx, parseAntigravityUsage(geminiResp))
-
-	// 将 Gemini 响应转换为 Claude 格式
-	claudeResp := convertGeminiToClaudeNonStream(req.Model, geminiResp)
-	reporter.ensurePublished(ctx)
-
-	return cliproxyexecutor.Response{Payload: []byte(claudeResp)}, nil
-}
+// (deprecated duplicate web search helpers removed)
 
 // antigravityEffectiveMaxTokens returns the max tokens to cap thinking:
 // prefer request-provided maxOutputTokens; otherwise fall back to model default.
@@ -1769,7 +1620,7 @@ func antigravityEffectiveMaxTokens(model string, payload []byte) (max int, fromM
 	if maxTok := gjson.GetBytes(payload, "request.generationConfig.maxOutputTokens"); maxTok.Exists() && maxTok.Int() > 0 {
 		return int(maxTok.Int()), false
 	}
-	if modelInfo := registry.GetGlobalRegistry().GetModelInfo(model); modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
+	if modelInfo := registry.GetGlobalRegistry().GetModelInfo(model, "antigravity"); modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
 		return modelInfo.MaxCompletionTokens, true
 	}
 	return 0, false
@@ -1778,7 +1629,7 @@ func antigravityEffectiveMaxTokens(model string, payload []byte) (max int, fromM
 // antigravityMinThinkingBudget returns the minimum thinking budget for a model.
 // Falls back to -1 if no model info is found.
 func antigravityMinThinkingBudget(model string) int {
-	if modelInfo := registry.GetGlobalRegistry().GetModelInfo(model); modelInfo != nil && modelInfo.Thinking != nil {
+	if modelInfo := registry.GetGlobalRegistry().GetModelInfo(model, "antigravity"); modelInfo != nil && modelInfo.Thinking != nil {
 		return modelInfo.Thinking.Min
 	}
 	return -1
