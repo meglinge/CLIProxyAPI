@@ -1,3 +1,5 @@
+//go:build deprecated
+
 package config
 
 import "strings"
