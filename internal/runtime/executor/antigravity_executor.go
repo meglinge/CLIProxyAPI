@@ -16,6 +16,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -56,26 +57,26 @@ var (
 	randSourceMutex sync.Mutex
 )
 
-// AntigravityExecutor proxies requests to the antigravity upstream.
+// AntigravityExecutor 将请求代理到 antigravity 上游。
 type AntigravityExecutor struct {
 	cfg *config.Config
 }
 
-// NewAntigravityExecutor creates a new Antigravity executor instance.
+// NewAntigravityExecutor 创建一个新的 Antigravity 执行器实例。
 //
-// Parameters:
-//   - cfg: The application configuration
+// 参数:
+//   - cfg: 应用配置
 //
-// Returns:
-//   - *AntigravityExecutor: A new Antigravity executor instance
+// 返回:
+//   - *AntigravityExecutor: 新的 Antigravity 执行器实例
 func NewAntigravityExecutor(cfg *config.Config) *AntigravityExecutor {
 	return &AntigravityExecutor{cfg: cfg}
 }
 
-// Identifier returns the executor identifier.
+// Identifier 返回执行器标识符。
 func (e *AntigravityExecutor) Identifier() string { return antigravityAuthType }
 
-// PrepareRequest injects Antigravity credentials into the outgoing HTTP request.
+// PrepareRequest 将 Antigravity 凭证注入到传出的 HTTP 请求中。
 func (e *AntigravityExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
 	if req == nil {
 		return nil
@@ -91,7 +92,7 @@ func (e *AntigravityExecutor) PrepareRequest(req *http.Request, auth *cliproxyau
 	return nil
 }
 
-// HttpRequest injects Antigravity credentials into the request and executes it.
+// HttpRequest 将 Antigravity 凭证注入请求并执行。
 func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
 	if req == nil {
 		return nil, fmt.Errorf("antigravity executor: request is nil")
@@ -107,7 +108,7 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 	return httpClient.Do(httpReq)
 }
 
-// Execute performs a non-streaming request to the Antigravity API.
+// Execute 执行到 Antigravity API 的非流式请求。
 func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
@@ -256,7 +257,7 @@ attemptLoop:
 	return resp, err
 }
 
-// executeClaudeNonStream performs a claude non-streaming request to the Antigravity API.
+// executeClaudeNonStream 执行 Claude 到 Antigravity API 的非流式请求。
 func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
@@ -266,6 +267,12 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	}
 	if updatedAuth != nil {
 		auth = updatedAuth
+	}
+
+	// 检测 web_search 工具 - 如果存在，使用 Gemini 代替 Claude 处理
+	if doWebSearchTool(req.Payload) {
+		log.Debugf("antigravity executor: web_search tool detected, using Gemini for non-stream: %s", req.Model)
+		return e.executeWebSearchOnly(ctx, auth, token, req, opts)
 	}
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
@@ -642,7 +649,7 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 	return []byte(output)
 }
 
-// ExecuteStream performs a streaming request to the Antigravity API.
+// ExecuteStream 执行到 Antigravity API 的流式请求。
 func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
@@ -661,6 +668,14 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
+
+	isClaude := strings.Contains(strings.ToLower(req.Model), "claude")
+
+	// Web search 工具 + Claude 模型: 路由到 Gemini 处理 (Claude 原生不支持 web_search)
+	if isClaude && doWebSearchTool(req.Payload) {
+		log.Debugf("antigravity executor: web_search tool detected, using Gemini for stream: %s", req.Model)
+		return e.executeWebSearchOnlyStream(ctx, auth, token, req, opts)
+	}
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
@@ -771,21 +786,21 @@ attemptLoop:
 				return nil, err
 			}
 
-			out := make(chan cliproxyexecutor.StreamChunk)
-			stream = out
-			go func(resp *http.Response) {
-				defer close(out)
-				defer func() {
-					if errClose := resp.Body.Close(); errClose != nil {
-						log.Errorf("antigravity executor: close response body error: %v", errClose)
-					}
-				}()
-				scanner := bufio.NewScanner(resp.Body)
-				scanner.Buffer(nil, streamScannerBuffer)
-				var param any
-				for scanner.Scan() {
-					line := scanner.Bytes()
-					appendAPIResponseChunk(ctx, e.cfg, line)
+		out := make(chan cliproxyexecutor.StreamChunk)
+		stream = out
+		go func(resp *http.Response, fromFmt, toFmt sdktranslator.Format) {
+			defer close(out)
+			defer func() {
+				if errClose := resp.Body.Close(); errClose != nil {
+					log.Errorf("antigravity executor: close response body error: %v", errClose)
+				}
+			}()
+			scanner := bufio.NewScanner(resp.Body)
+			scanner.Buffer(nil, streamScannerBuffer)
+			var param any
+			for scanner.Scan() {
+				line := scanner.Bytes()
+				appendAPIResponseChunk(ctx, e.cfg, line)
 
 					// Filter usage metadata for all models
 					// Only retain usage statistics in the terminal chunk
@@ -800,25 +815,26 @@ attemptLoop:
 						reporter.publish(ctx, detail)
 					}
 
-					chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, bytes.Clone(payload), &param)
-					for i := range chunks {
-						out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
-					}
+				chunks := sdktranslator.TranslateStream(ctx, toFmt, fromFmt, req.Model, bytes.Clone(opts.OriginalRequest), translated, bytes.Clone(payload), &param)
+
+				for i := range chunks {
+					out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
 				}
-				tail := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, []byte("[DONE]"), &param)
-				for i := range tail {
-					out <- cliproxyexecutor.StreamChunk{Payload: []byte(tail[i])}
-				}
-				if errScan := scanner.Err(); errScan != nil {
-					recordAPIResponseError(ctx, e.cfg, errScan)
-					reporter.publishFailure(ctx)
-					out <- cliproxyexecutor.StreamChunk{Err: errScan}
-				} else {
-					reporter.ensurePublished(ctx)
-				}
-			}(httpResp)
-			return stream, nil
-		}
+			}
+			tail := sdktranslator.TranslateStream(ctx, toFmt, fromFmt, req.Model, bytes.Clone(opts.OriginalRequest), translated, []byte("[DONE]"), &param)
+			for i := range tail {
+				out <- cliproxyexecutor.StreamChunk{Payload: []byte(tail[i])}
+			}
+			if errScan := scanner.Err(); errScan != nil {
+				recordAPIResponseError(ctx, e.cfg, errScan)
+				reporter.publishFailure(ctx)
+				out <- cliproxyexecutor.StreamChunk{Err: errScan}
+			} else {
+				reporter.ensurePublished(ctx)
+			}
+		}(httpResp, from, to)
+		return stream, nil
+	}
 
 		switch {
 		case lastStatus != 0:
@@ -1602,4 +1618,482 @@ func generateProjectID() string {
 	randSourceMutex.Unlock()
 	randomPart := strings.ToLower(uuid.NewString())[:5]
 	return adj + "-" + noun + "-" + randomPart
+}
+
+// (deprecated duplicate web search helpers removed)
+
+// antigravityEffectiveMaxTokens returns the max tokens to cap thinking:
+// prefer request-provided maxOutputTokens; otherwise fall back to model default.
+// The boolean indicates whether the value came from the model default (and thus should be written back).
+func antigravityEffectiveMaxTokens(model string, payload []byte) (max int, fromModel bool) {
+	if maxTok := gjson.GetBytes(payload, "request.generationConfig.maxOutputTokens"); maxTok.Exists() && maxTok.Int() > 0 {
+		return int(maxTok.Int()), false
+	}
+	if modelInfo := registry.GetGlobalRegistry().GetModelInfo(model, "antigravity"); modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
+		return modelInfo.MaxCompletionTokens, true
+	}
+	return 0, false
+}
+
+// antigravityMinThinkingBudget returns the minimum thinking budget for a model.
+// Falls back to -1 if no model info is found.
+func antigravityMinThinkingBudget(model string) int {
+	if modelInfo := registry.GetGlobalRegistry().GetModelInfo(model, "antigravity"); modelInfo != nil && modelInfo.Thinking != nil {
+		return modelInfo.Thinking.Min
+	}
+	return -1
+}
+
+// 通过 gemini-2.5-flash 的 googleSearch 为 Claude 模型提供 Web 搜索支持
+
+const webSearchGeminiModel = "gemini-2.5-flash"
+
+// googleURLRegex 用于匹配所有 google.com 相关的 URL
+var googleURLRegex = regexp.MustCompile(`https?://[a-zA-Z0-9.-]*google\.com[^\s]*`)
+
+// stripGoogleURLs 移除文本中所有 google.com 相关的 URL
+func stripGoogleURLs(text string) string {
+	return strings.TrimSpace(googleURLRegex.ReplaceAllString(text, ""))
+}
+
+// doWebSearchTool 检查原始请求中是否包含 web_search 工具
+func doWebSearchTool(payload []byte) bool {
+	tools := gjson.GetBytes(payload, "tools")
+	if !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		toolType := tool.Get("type").String()
+		if strings.HasPrefix(toolType, "web_search") {
+			return true
+		}
+	}
+	return false
+}
+
+// extractUserQuery 提取最后一条用户消息文本用于 Web 搜索
+func extractUserQuery(payload []byte) string {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return ""
+	}
+	arr := messages.Array()
+	// 查找最后一条用户消息
+	for i := len(arr) - 1; i >= 0; i-- {
+		msg := arr[i]
+		if msg.Get("role").String() == "user" {
+			content := msg.Get("content")
+			if content.Type == gjson.String {
+				return content.String()
+			}
+			// 尝试数组格式
+			if content.IsArray() {
+				for _, item := range content.Array() {
+					if item.Get("type").String() == "text" {
+						return item.Get("text").String()
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// executeGeminiWebSearch 使用 Gemini 的 googleSearch 工具执行 Web 搜索
+// 返回完整的响应体（包含文本和 groundingMetadata）
+func (e *AntigravityExecutor) executeGeminiWebSearch(ctx context.Context, auth *cliproxyauth.Auth, token, query string) ([]byte, error) {
+	if query == "" {
+		return nil, fmt.Errorf("empty query")
+	}
+
+	// 构建带有 googleSearch 工具的 Gemini 请求
+	geminiPayload := `{"model":"","request":{"contents":[],"tools":[{"googleSearch":{}}]}}`
+	geminiPayload, _ = sjson.Set(geminiPayload, "model", webSearchGeminiModel)
+	geminiPayload, _ = sjson.Set(geminiPayload, "request.contents.0.role", "user")
+	geminiPayload, _ = sjson.Set(geminiPayload, "request.contents.0.parts.0.text", query)
+
+	// 应用项目 ID
+	projectID := ""
+	if auth != nil && auth.Metadata != nil {
+		if pid, ok := auth.Metadata["project_id"].(string); ok {
+			projectID = strings.TrimSpace(pid)
+		}
+	}
+	geminiPayload = string(geminiToAntigravity(webSearchGeminiModel, []byte(geminiPayload), projectID))
+
+	baseURLs := antigravityBaseURLFallbackOrder(auth)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+
+	for _, baseURL := range baseURLs {
+		base := strings.TrimSuffix(baseURL, "/")
+		requestURL := base + antigravityGeneratePath
+
+		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader([]byte(geminiPayload)))
+		if errReq != nil {
+			continue
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+		httpReq.Header.Set("Accept", "application/json")
+		if host := resolveHost(base); host != "" {
+			httpReq.Host = host
+		}
+
+		httpResp, errDo := httpClient.Do(httpReq)
+		if errDo != nil {
+			log.Debugf("antigravity web search: request failed: %v", errDo)
+			continue
+		}
+
+		bodyBytes, errRead := io.ReadAll(httpResp.Body)
+		_ = httpResp.Body.Close()
+		if errRead != nil {
+			continue
+		}
+
+		if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
+			log.Debugf("antigravity web search: upstream error status: %d", httpResp.StatusCode)
+			continue
+		}
+
+		log.Debugf("antigravity web search: got response for query: %s", query)
+		return bodyBytes, nil
+	}
+
+	return nil, fmt.Errorf("web search failed")
+}
+
+// executeWebSearchOnly 使用 Gemini 代替 Claude 处理 Web 搜索请求
+// 这是一个非流式实现，返回 Claude 格式的响应
+func (e *AntigravityExecutor) executeWebSearchOnly(ctx context.Context, auth *cliproxyauth.Auth, token string, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+
+	query := extractUserQuery(req.Payload)
+	if query == "" {
+		reporter.publishFailure(ctx)
+		return cliproxyexecutor.Response{}, fmt.Errorf("no user query found for web search")
+	}
+
+	// 执行 Gemini Web 搜索
+	geminiResp, err := e.executeGeminiWebSearch(ctx, auth, token, query)
+	if err != nil {
+		reporter.publishFailure(ctx)
+		return cliproxyexecutor.Response{}, err
+	}
+
+	// 发布 Gemini 响应的 usage 统计
+	reporter.publish(ctx, parseAntigravityUsage(geminiResp))
+
+	// 将 Gemini 响应转换为 Claude 格式
+	claudeResp := convertGeminiToClaudeNonStream(req.Model, geminiResp)
+	reporter.ensurePublished(ctx)
+
+	return cliproxyexecutor.Response{Payload: []byte(claudeResp)}, nil
+}
+
+// executeWebSearchOnlyStream 使用 Gemini 代替 Claude 处理 Web 搜索请求
+// 这是一个流式实现，返回 Claude SSE 格式的响应
+func (e *AntigravityExecutor) executeWebSearchOnlyStream(ctx context.Context, auth *cliproxyauth.Auth, token string, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
+	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+
+	query := extractUserQuery(req.Payload)
+	if query == "" {
+		reporter.publishFailure(ctx)
+		return nil, fmt.Errorf("no user query found for web search")
+	}
+
+	// 执行 Gemini Web 搜索（非流式，然后转换为流式格式）
+	geminiResp, err := e.executeGeminiWebSearch(ctx, auth, token, query)
+	if err != nil {
+		reporter.publishFailure(ctx)
+		return nil, err
+	}
+
+	// 发布 Gemini 响应的 usage 统计
+	reporter.publish(ctx, parseAntigravityUsage(geminiResp))
+
+	out := make(chan cliproxyexecutor.StreamChunk)
+	go func() {
+		defer close(out)
+
+		// 将 Gemini 响应转换为 Claude SSE 流
+		sseEvents := convertGeminiToClaudeSSEStream(req.Model, geminiResp)
+		for _, event := range sseEvents {
+			out <- cliproxyexecutor.StreamChunk{Payload: []byte(event)}
+		}
+
+		reporter.ensurePublished(ctx)
+	}()
+
+	return out, nil
+}
+
+// convertGeminiToClaudeNonStream 将 Gemini 响应转换为 Claude 非流式格式
+func convertGeminiToClaudeNonStream(model string, geminiResp []byte) string {
+	// 从 Gemini 响应中提取数据
+	// 首先尝试包装格式 (response.candidates...)，然后尝试顶层格式 (candidates...)
+	textContent := ""
+	if parts := gjson.GetBytes(geminiResp, "response.candidates.0.content.parts"); parts.IsArray() {
+		for _, part := range parts.Array() {
+			if text := part.Get("text"); text.Exists() {
+				textContent += text.String()
+			}
+		}
+	} else if parts := gjson.GetBytes(geminiResp, "candidates.0.content.parts"); parts.IsArray() {
+		for _, part := range parts.Array() {
+			if text := part.Get("text"); text.Exists() {
+				textContent += text.String()
+			}
+		}
+	}
+
+	// 过滤 textContent 中的 google.com 相关 URL
+	textContent = stripGoogleURLs(textContent)
+
+	groundingMetadata := gjson.GetBytes(geminiResp, "response.candidates.0.groundingMetadata")
+	if !groundingMetadata.Exists() {
+		groundingMetadata = gjson.GetBytes(geminiResp, "candidates.0.groundingMetadata")
+	}
+
+	// 从 Gemini 响应中获取 usage
+	inputTokens := gjson.GetBytes(geminiResp, "response.usageMetadata.promptTokenCount").Int()
+	if inputTokens == 0 {
+		inputTokens = gjson.GetBytes(geminiResp, "usageMetadata.promptTokenCount").Int()
+	}
+	outputTokens := gjson.GetBytes(geminiResp, "response.usageMetadata.candidatesTokenCount").Int()
+	if outputTokens == 0 {
+		outputTokens = gjson.GetBytes(geminiResp, "usageMetadata.candidatesTokenCount").Int()
+	}
+
+	// 构建 Claude 响应
+	msgID := fmt.Sprintf("msg_%s", uuid.New().String()[:24])
+	toolUseID := fmt.Sprintf("srvtoolu_%d", time.Now().UnixNano())
+
+	// 从 webSearchQueries 构建搜索查询
+	searchQuery := ""
+	if queries := groundingMetadata.Get("webSearchQueries"); queries.IsArray() && len(queries.Array()) > 0 {
+		searchQuery = queries.Array()[0].String()
+	}
+
+	// 构建 content 数组
+	content := []map[string]interface{}{}
+
+	// 1. server_tool_use 块
+	serverToolUse := map[string]interface{}{
+		"type":  "server_tool_use",
+		"id":    toolUseID,
+		"name":  "web_search",
+		"input": map[string]interface{}{"query": searchQuery},
+	}
+	content = append(content, serverToolUse)
+
+	// 2. web_search_tool_result 块（过滤 vertexaisearch.cloud.google.com URL）
+	webSearchResults := []map[string]interface{}{}
+	groundingChunks := groundingMetadata.Get("groundingChunks")
+	if groundingChunks.IsArray() {
+		for _, chunk := range groundingChunks.Array() {
+			web := chunk.Get("web")
+			if web.Exists() {
+				result := map[string]interface{}{
+					"type":     "web_search_result",
+					"page_age": nil,
+				}
+				if title := web.Get("title"); title.Exists() {
+					result["title"] = title.String()
+				}
+				// 只有不包含 vertexaisearch.cloud.google.com 的 URL 才设置
+				if uri := web.Get("uri"); uri.Exists() {
+					uriStr := uri.String()
+					if !strings.Contains(uriStr, "vertexaisearch.cloud.google.com") {
+						result["url"] = uriStr
+					}
+				}
+				if domain := web.Get("domain"); domain.Exists() {
+					result["encrypted_content"] = domain.String()
+				}
+				webSearchResults = append(webSearchResults, result)
+			}
+		}
+	}
+	if len(webSearchResults) > 0 {
+		webSearchToolResult := map[string]interface{}{
+			"type":        "web_search_tool_result",
+			"tool_use_id": toolUseID,
+			"content":     webSearchResults,
+		}
+		content = append(content, webSearchToolResult)
+	}
+
+	// 3. Gemini 响应的 text 块
+	if textContent != "" {
+		textBlock := map[string]interface{}{
+			"type": "text",
+			"text": textContent,
+		}
+		content = append(content, textBlock)
+	}
+
+	// 构建最终响应
+	response := map[string]interface{}{
+		"id":            msgID,
+		"type":          "message",
+		"role":          "assistant",
+		"content":       content,
+		"model":         model,
+		"stop_reason":   "end_turn",
+		"stop_sequence": nil,
+		"usage": map[string]interface{}{
+			"input_tokens":  inputTokens,
+			"output_tokens": outputTokens,
+			"server_tool_use": map[string]interface{}{
+				"web_search_requests": 1,
+			},
+		},
+	}
+
+	respJSON, _ := json.Marshal(response)
+	return string(respJSON)
+}
+
+// convertGeminiToClaudeSSEStream 将 Gemini 响应转换为 Claude SSE 流式格式。
+func convertGeminiToClaudeSSEStream(model string, geminiResp []byte) []string {
+	var events []string
+
+	// 从 Gemini 响应中提取数据
+	textContent := ""
+	if parts := gjson.GetBytes(geminiResp, "response.candidates.0.content.parts"); parts.IsArray() {
+		for _, part := range parts.Array() {
+			if text := part.Get("text"); text.Exists() {
+				textContent += text.String()
+			}
+		}
+	} else if parts := gjson.GetBytes(geminiResp, "candidates.0.content.parts"); parts.IsArray() {
+		for _, part := range parts.Array() {
+			if text := part.Get("text"); text.Exists() {
+				textContent += text.String()
+			}
+		}
+	}
+
+	// 过滤 textContent 中的 google.com 相关 URL
+	textContent = stripGoogleURLs(textContent)
+
+	groundingMetadata := gjson.GetBytes(geminiResp, "response.candidates.0.groundingMetadata")
+	if !groundingMetadata.Exists() {
+		groundingMetadata = gjson.GetBytes(geminiResp, "candidates.0.groundingMetadata")
+	}
+
+	// 从 Gemini 响应中获取 usage
+	inputTokens := gjson.GetBytes(geminiResp, "response.usageMetadata.promptTokenCount").Int()
+	if inputTokens == 0 {
+		inputTokens = gjson.GetBytes(geminiResp, "usageMetadata.promptTokenCount").Int()
+	}
+	outputTokens := gjson.GetBytes(geminiResp, "response.usageMetadata.candidatesTokenCount").Int()
+	if outputTokens == 0 {
+		outputTokens = gjson.GetBytes(geminiResp, "usageMetadata.candidatesTokenCount").Int()
+	}
+
+	msgID := fmt.Sprintf("msg_%s", uuid.New().String()[:24])
+	toolUseID := fmt.Sprintf("srvtoolu_%d", time.Now().UnixNano())
+
+	// 从 webSearchQueries 构建搜索查询
+	searchQuery := ""
+	if queries := groundingMetadata.Get("webSearchQueries"); queries.IsArray() && len(queries.Array()) > 0 {
+		searchQuery = queries.Array()[0].String()
+	}
+
+	// 1. message_start
+	messageStart := fmt.Sprintf(`{"type":"message_start","message":{"id":"%s","type":"message","role":"assistant","content":[],"model":"%s","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":%d,"output_tokens":0}}}`,
+		msgID, model, inputTokens)
+	events = append(events, "event: message_start\ndata: "+messageStart+"\n\n")
+
+	contentIndex := 0
+
+	// 2. server_tool_use 块 (index 0)
+	serverToolUseStart := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"server_tool_use","id":"%s","name":"web_search","input":{}}}`,
+		contentIndex, toolUseID)
+	events = append(events, "event: content_block_start\ndata: "+serverToolUseStart+"\n\n")
+
+	// input_json_delta
+	if searchQuery != "" {
+		queryJSON, _ := sjson.Set(`{}`, "query", searchQuery)
+		inputDelta := fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, contentIndex)
+		inputDelta, _ = sjson.Set(inputDelta, "delta.partial_json", queryJSON)
+		events = append(events, "event: content_block_delta\ndata: "+inputDelta+"\n\n")
+	}
+
+	events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", contentIndex))
+	contentIndex++
+
+	// 3. web_search_tool_result 块（过滤 vertexaisearch.cloud.google.com URL）
+	webSearchResults := "[]"
+	hasResults := false
+	groundingChunks := groundingMetadata.Get("groundingChunks")
+	if groundingChunks.IsArray() {
+		for _, chunk := range groundingChunks.Array() {
+			web := chunk.Get("web")
+			if web.Exists() {
+				result := `{"type":"web_search_result"}`
+				if title := web.Get("title"); title.Exists() {
+					result, _ = sjson.Set(result, "title", title.String())
+				}
+				// 只有不包含 vertexaisearch.cloud.google.com 的 URL 才设置
+				if uri := web.Get("uri"); uri.Exists() {
+					uriStr := uri.String()
+					if !strings.Contains(uriStr, "vertexaisearch.cloud.google.com") {
+						result, _ = sjson.Set(result, "url", uriStr)
+					}
+				}
+				if domain := web.Get("domain"); domain.Exists() {
+					result, _ = sjson.Set(result, "encrypted_content", domain.String())
+				}
+				result, _ = sjson.Set(result, "page_age", nil)
+				webSearchResults, _ = sjson.SetRaw(webSearchResults, "-1", result)
+				hasResults = true
+			}
+		}
+	}
+
+	if hasResults {
+		webSearchToolResultStart := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"web_search_tool_result","tool_use_id":"%s","content":[]}}`,
+			contentIndex, toolUseID)
+		webSearchToolResultStart, _ = sjson.SetRaw(webSearchToolResultStart, "content_block.content", webSearchResults)
+		events = append(events, "event: content_block_start\ndata: "+webSearchToolResultStart+"\n\n")
+		events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", contentIndex))
+		contentIndex++
+	}
+
+	// 4. Gemini 响应的 text 块
+	if textContent != "" {
+		textBlockStart := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, contentIndex)
+		events = append(events, "event: content_block_start\ndata: "+textBlockStart+"\n\n")
+
+		// 将文本分割成更小的块以实现更真实的流式效果
+		// 使用基于 rune 的分块以避免 UTF-8 多字节字符截断
+		runes := []rune(textContent)
+		chunkSize := 50
+		for i := 0; i < len(runes); i += chunkSize {
+			end := i + chunkSize
+			if end > len(runes) {
+				end = len(runes)
+			}
+			chunk := string(runes[i:end])
+			textDelta := fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, contentIndex)
+			textDelta, _ = sjson.Set(textDelta, "delta.text", chunk)
+			events = append(events, "event: content_block_delta\ndata: "+textDelta+"\n\n")
+		}
+
+		events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", contentIndex))
+	}
+
+	// 5. 带有 stop_reason 和 usage 的 message_delta
+	messageDelta := fmt.Sprintf(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":%d,"output_tokens":%d,"server_tool_use":{"web_search_requests":1}}}`,
+		inputTokens, outputTokens)
+	events = append(events, "event: message_delta\ndata: "+messageDelta+"\n\n")
+
+	// 6. message_stop
+	events = append(events, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+
+	return events
 }
